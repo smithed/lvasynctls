@@ -1,0 +1,1 @@
+Code here is implemented primarily based on boost code (as a starting point) using LICENSE_1_0.txt in this directory
