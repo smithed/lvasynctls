@@ -594,9 +594,9 @@ extern "C" {
 				creator->ctx.use_tmp_dh_file(f);
 				return mgNoErr;
 			}
-			catch (...)
+			catch (boost::system::system_error se)
 			{
-				return 42;
+				return se.code().value();
 			}
 		}
 		else {
@@ -637,7 +637,7 @@ extern "C" {
 
 	lvExport MgErr lvtlsBeginWrite(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, LStrHandle data, uint32_t requestID)
 	{
-		if (s && e && (*e) != kNotAMagicCookie && LHStrPtr(data) && LHStrBuf(data)) {
+		if (s && e && (*e) != kNotAMagicCookie && LHStrPtr(data) && LHStrBuf(data) && (LHStrLen(data) > 0)) {
 			lvasyncapi::LVNotificationCallback * cb = nullptr;
 			std::vector<unsigned char>* writeData;
 			try {
@@ -956,7 +956,11 @@ namespace lvasyncapi {
 			LStrLen(LHStrPtr(eventData.errorString)) = errorMessage.size();
 			MoveBlock(errorMessage.data(), LHStrBuf(eventData.errorString), errorMessage.size());
 		}
-		PostLVUserEvent(*e, (void *)(&eventData));
+		auto err = PostLVUserEvent(*e, (void *)(&eventData));
+		if (err != mgNoErr) {
+			delete s;
+			s = nullptr;
+		}
 	}
 
 	void LVConnectionNotificationCallback::setErrorCondition(const boost::system::error_code & error)
@@ -1000,7 +1004,7 @@ namespace lvasyncapi {
 			eventData.errorData = (LStrHandle)DSNewHClr(sizeof(int32_t)); //size 0
 		}
 
-		PostLVUserEvent(*e, (void *)(&eventData));
+		auto err = PostLVUserEvent(*e, (void *)(&eventData));
 	}
 
 	void LVCompletionNotificationCallback::setErrorCondition(const boost::system::error_code & error)
