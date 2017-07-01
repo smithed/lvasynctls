@@ -38,71 +38,65 @@ namespace lvasynctls {
 	lvAsyncEngine::~lvAsyncEngine()
 	{
 		try {
-			if (engineWork) {
-				delete engineWork;
-				engineWork = nullptr;
+			std::unordered_set<lvTlsSocketBase*> sockSnapshot;
+			std::unordered_set<lvTlsConnectionCreator*> connSnapshot;
+			{
+				std::lock_guard<std::mutex> lg(lock);
+				
+				sockSnapshot = socketSet;
+				connSnapshot = connectorSet;
+				socketSet.empty();
+				connectorSet.empty();
 			}
+
+			if (connSnapshot.size() > 0) {
+				for (auto itr = connSnapshot.begin(); itr != connSnapshot.end(); ++itr) {
+					try {
+						auto val = *itr;
+						if (val) {
+							delete val;
+							val = nullptr;
+						}
+					}
+					catch (...) {
+					}
+				}
+			}
+
+			if (sockSnapshot.size() > 0) {
+				for (auto itr = sockSnapshot.begin(); itr != sockSnapshot.end(); ++itr) {
+					try {
+						auto val = *itr;
+						if (val) {
+							delete val;
+							val = nullptr;
+						}
+					}
+					catch (...) {
+					}
+				}
+			}
+			
+		}
+		catch (...) {
+		}
+
+		//engine has to run to allow sockets to shutdown do we do that now.
+		try {
+			delete engineWork;
+			engineWork = nullptr;
 
 			ioEngine->stop();
 		}
 		catch (...) {
-
 		}
-
-
-		try {
-
-
-			//lock		
-			auto l = lock.try_lock();
-			if (!l) {
-				while (!l) {
-					boost::this_thread::sleep(boost::posix_time::milliseconds(1));
-					l = lock.try_lock();
-				}
-			}
-
-			std::unordered_set<lvTlsSocketBase*> sockSnapshot(socketSet);
-			std::unordered_set<lvTlsConnectionCreator*> connSnapshot(connectorSet);
-
-			lock.unlock();
-			//unlock
-
-			for (std::unordered_set<lvTlsSocketBase*>::iterator itr = sockSnapshot.begin(); itr != sockSnapshot.end(); ++itr) {
-				try {
-					auto val = *itr;
-					delete val;
-					val = nullptr;
-				}
-				catch (...) {
-
-				}
-			}
-
-			for (std::unordered_set<lvTlsConnectionCreator*>::iterator itr = connSnapshot.begin(); itr != connSnapshot.end(); ++itr) {
-				try {
-					auto val = *itr;
-					delete val;
-					val = nullptr;
-				}
-				catch (...) {
-
-				}
-			}
-		}
-		catch (...) {
-
-		}
-
 		try {
 			threadSet.interrupt_all();
 			threadSet.join_all();
 		}
 		catch (...)
 		{
-
 		}
-
 
 		ioEngine.reset();
 	}
@@ -115,8 +109,13 @@ namespace lvasynctls {
 	void lvAsyncEngine::registerSocket(lvTlsSocketBase * tlsSock)
 	{
 		if (tlsSock) {
-			std::lock_guard<std::mutex> lockg(lock);
-			socketSet.insert(tlsSock);
+			try {
+				std::lock_guard<std::mutex> lockg(lock);
+				socketSet.insert(tlsSock);
+			}
+			catch (...)	{
+
+			}
 		}
 
 		return;
@@ -124,10 +123,15 @@ namespace lvasynctls {
 
 	std::size_t lvAsyncEngine::unregisterSocket(lvTlsSocketBase * tlsSock)
 	{
-		std::size_t count;
+		std::size_t count = 0;
 		if (tlsSock) {
-			std::lock_guard<std::mutex> lockg(lock);
-			count = socketSet.erase(tlsSock);
+			try {
+				std::lock_guard<std::mutex> lockg(lock);
+				count = socketSet.erase(tlsSock);
+			}
+			catch (...) {
+
+			}
 		}
 
 		return count;
@@ -136,8 +140,13 @@ namespace lvasynctls {
 	void lvAsyncEngine::registerConnector(lvTlsConnectionCreator * connector)
 	{
 		if (connector) {
-			std::lock_guard<std::mutex> lockg(lock);
-			connectorSet.insert(connector);
+			try {
+				std::lock_guard<std::mutex> lockg(lock);
+				connectorSet.insert(connector);
+			}
+			catch (...) {
+
+			}
 		}
 
 		return;
@@ -145,22 +154,20 @@ namespace lvasynctls {
 
 	std::size_t lvAsyncEngine::unregisterConnector(lvTlsConnectionCreator * connector)
 	{
-		std::size_t count;
+		std::size_t count = 0;
 		if (connector) {
-			std::lock_guard<std::mutex> lockg(lock);
-			count = connectorSet.erase(connector);
+			try {
+				std::lock_guard<std::mutex> lockg(lock);
+				count = connectorSet.erase(connector);
+			}
+			catch (...) {
+
+			}
 		}
 
 		return count;
 	}
 
-	void lvAsyncEngine::softShutdown()
-	{
-		if (engineWork) {
-			delete engineWork;
-			engineWork = nullptr;
-		}
-	}
 
 	//adds workers to the thread pool
 	void lvAsyncEngine::initializeThreads(std::size_t threadCount)
@@ -180,7 +187,7 @@ namespace lvasynctls {
 				{
 					ioengine->run();
 				}
-				catch (const std::exception&)
+				catch (...)
 				{
 					//ignore exceptions
 					if (ioengine && !(ioengine->stopped() || boost::this_thread::interruption_enabled())) {

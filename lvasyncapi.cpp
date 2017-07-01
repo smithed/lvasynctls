@@ -1,24 +1,4 @@
 
-//#include <stdio.h>
-//#include <algorithm>
-//#include <memory>
-//#include <cstdlib>
-//#include <iostream>
-//#include <vector>
-//#include <thread>
-//#include <unordered_set>
-//#include <mutex>
-//#include <boost/bind.hpp>
-//#include <boost/ref.hpp>
-//#include <boost/asio.hpp>
-//#include <boost/asio/ssl.hpp>
-//#include <boost/thread.hpp>
-//#include <boost/date_time/posix_time/posix_time.hpp>
-//#include <boost/asio/ip/tcp.hpp>
-//#include <boost/lockfree/queue.hpp>
-//#include "lvAsyncTls.hpp"
-
-
 #include "lvasyncapi.h"
 #include <extcode.h>
 #include <boost/asio.hpp>
@@ -49,7 +29,7 @@ std::vector<uint8_t> LStrToVector(LStrHandle s) {
 	return v;
 }
 
-static std::unordered_set<lvasynctls::lvAsyncEngine*> engineSet{};
+static std::unordered_set<lvasynctls::lvAsyncEngine**> engineSet{};
 static std::mutex engineSetLock{};
 
 #ifdef __cplusplus
@@ -66,13 +46,6 @@ extern "C" {
 	//todo: error
 	lvExport MgErr lvTlsIOengine_unreserve(InstanceDataPtr * instance)
 	{
-		try {
-			clearInstanceEngineSet();
-		}
-		catch (...) {
-			return mgArgErr;
-		}
-
 		return mgNoErr;
 	}
 
@@ -80,44 +53,44 @@ extern "C" {
 	{
 		try {
 			clearInstanceEngineSet();
+			return mgNoErr;
 		}
 		catch (...) {
-			return mgArgErr;
 		}
-
 		return mgNoErr;
 	}
 
 	void clearInstanceEngineSet() 
 	{
-		std::lock_guard<std::mutex> lockg(engineSetLock);
+		std::unordered_set<lvasynctls::lvAsyncEngine**> setCpy;
 		try {
-			for (auto itr = engineSet.begin(); itr != engineSet.end(); ++itr) {
-				try {
-					auto engPtr = *itr;
-					if (engPtr) {
-						delete engPtr;
+			std::lock_guard<std::mutex> lockg(engineSetLock);
+			setCpy = engineSet;
+			engineSet.clear();
+		}
+		catch (...) {
+		}
+		try {
+			if (setCpy.size() > 0) {
+				for (auto itr = setCpy.begin(); itr != setCpy.end(); ++itr) {
+					try {
+						auto engPtr = *itr;
+						delete (*engPtr);
+						*engPtr = nullptr;
+						//don't delete engPtr here, new pattern is ONLY delete the ptr if the appropriate shutdown is called.
+						//out of band failures will leave the handle intact but pointing to null
 					}
-				}
-				catch (...) {
+					catch (...) {
+					}
 				}
 			}
 		}
 		catch (...)
 		{
-
 		}
-		try {
-			engineSet.clear();
-		}
-		catch (...)
-		{
-
-		}	
 	}
 	
-
-	void lvTlsIOengine_recordInstance(lvasynctls::lvAsyncEngine * engine)
+	void lvTlsIOengine_recordInstance(lvasynctls::lvAsyncEngine ** engine)
 	{
 		try {
 			std::lock_guard<std::mutex> lockg(engineSetLock);
@@ -131,7 +104,7 @@ extern "C" {
 		}
 	}
 
-	void lvTlsIOengine_removeInstance(lvasynctls::lvAsyncEngine * engine)
+	void lvTlsIOengine_removeInstance(lvasynctls::lvAsyncEngine ** engine)
 	{
 		try {
 			std::lock_guard<std::mutex> lockg(engineSetLock);
@@ -147,31 +120,51 @@ extern "C" {
 
 
 	//engine
-	lvExport lvasynctls::lvAsyncEngine * lvtlsCreateIOEngine()
+	lvExport lvasynctls::lvAsyncEngine ** lvtlsCreateIOEngine()
 	{
-		lvasynctls::lvAsyncEngine * engine;
+		auto engine = new (lvasynctls::lvAsyncEngine *);
 		try {
-			engine = new lvasynctls::lvAsyncEngine();
+			(*engine) = new lvasynctls::lvAsyncEngine();
 			lvTlsIOengine_recordInstance(engine);
 			return engine;
 		}
 		catch (...) {
-			if (engine) {
-				delete engine;
-				engine = nullptr;
-			}
+			delete (*engine);
+			delete engine;
+
 			return nullptr;
 		}	
 	}
 
-	lvExport MgErr lvtlsDisposeIOEngine(lvasynctls::lvAsyncEngine * engine)
+	//engine
+	lvExport lvasynctls::lvAsyncEngine ** lvtlsCreateIOEngineNThreads(std::size_t threadCount)
+	{
+		auto engine = new (lvasynctls::lvAsyncEngine *);
+		try {
+			(*engine) = new lvasynctls::lvAsyncEngine(threadCount);
+			lvTlsIOengine_recordInstance(engine);
+			return engine;
+		}
+		catch (...) {
+			delete (*engine);
+			delete engine;
+
+			return nullptr;
+		}
+	}
+
+	lvExport MgErr lvtlsDisposeIOEngine(lvasynctls::lvAsyncEngine ** engine)
 	{
 		try {
 			if (engine) {
-				engine->softShutdown();
 				lvTlsIOengine_removeInstance(engine);
+
+				delete (*engine);
+				*engine = nullptr;
+
 				delete engine;
 				engine = nullptr;
+
 				return mgNoErr;
 			}
 			else {
@@ -183,21 +176,21 @@ extern "C" {
 		}
 	}
 
-
 	//client
-	lvExport lvasynctls::lvTlsClientConnector * lvtlsCreateClientConnector(lvasynctls::lvAsyncEngine * engine)
+	lvExport lvasynctls::lvTlsClientConnector ** lvtlsCreateClientConnector(lvasynctls::lvAsyncEngine ** engine)
 	{
-		if (engine) {
-			lvasynctls::lvTlsClientConnector * c;
+		if (engine && *engine) {
+			auto c = new (lvasynctls::lvTlsClientConnector *);
 			try {
-				c = new lvasynctls::lvTlsClientConnector(engine);
+				(*c) = new lvasynctls::lvTlsClientConnector(*engine);
 				return c;
 			}
 			catch (...) {
-				if (c) {
-					delete c;
-					c = nullptr;
-				}
+				delete (*c);
+				*c = nullptr;
+				delete c;
+				c = nullptr;
+				
 				return nullptr;
 			}
 		}
@@ -206,62 +199,47 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsDisposeClientConnector(lvasynctls::lvTlsClientConnector * client)
-	{
-		try {
-			if (client) {
-				delete client;
-				client = nullptr;
-				return mgNoErr;
-			}
-			else {
-				return oleNullRefnumPassed;
-			}
-		}
-		catch (...) {
-			return 42;
-		}
-	}
-
-	lvExport MgErr lvtlsBeginClientConnect(lvasynctls::lvTlsClientConnector * client, 
+	lvExport MgErr lvtlsBeginClientConnect(lvasynctls::lvTlsClientConnector ** client,
 		LStrHandle host, LStrHandle port, LVUserEventRef * e, uint32_t requestID)
 	{
-		if (client && e != nullptr && *e != kNotAMagicCookie && LHStrPtr(host) && LHStrPtr(port) && LHStrBuf(host) && LHStrBuf(port)) {
-			lvasyncapi::LVConnectionNotificationCallback * cb;
+		if (client && *client && LHStrPtr(host) && LHStrPtr(port) && LHStrBuf(host) && LHStrBuf(port)) {
+			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
 			try {
-				auto cb = new lvasyncapi::LVConnectionNotificationCallback(e, lvasyncapi::lvRequestType::ClientConnect, requestID);
-				client->resolveAndConnect(LstrToStdStr(host), LstrToStdStr(port), cb);
+				if (e && *e != kNotAMagicCookie) {
+					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
+				}
+				(*client)->resolveAndConnect(LstrToStdStr(host), LstrToStdStr(port), cb);
 				return mgNoErr;
 			}
 			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
+				delete cb;
+				cb = nullptr;
+				
 				return 42;
 			}
 		}
+		else if (client && *client) {
+			return axEventQueueNotCreated;
+		}
 		else {
-			if (client) {
-				return axEventQueueNotCreated;
-			}
-			else {
-				return oleNullRefnumPassed;
-			}
+			return oleNullRefnumPassed;
 		}
 	}
 
 	//server
-	lvExport lvasynctls::lvTlsServerAcceptor * lvtlsCreateServerAcceptor(lvasynctls::lvAsyncEngine * engine, uint16_t port)
+	lvExport lvasynctls::lvTlsServerAcceptor ** lvtlsCreateServerAcceptor(lvasynctls::lvAsyncEngine ** engine, uint16_t port)
 	{
-		if (engine) {
-			lvasynctls::lvTlsServerAcceptor * a;
+		if (engine && *engine) {
+			auto a = new (lvasynctls::lvTlsServerAcceptor *);
 			try {
-				a = new lvasynctls::lvTlsServerAcceptor(engine, port);
+				(*a) = new lvasynctls::lvTlsServerAcceptor(*engine, port);
 				return a;
 			}
 			catch (...) {
 				if (a) {
+					delete (*a);
+					*a = nullptr;
+
 					delete a;
 					a = nullptr;
 				}
@@ -273,12 +251,45 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsDisposeServerAcceptor(lvasynctls::lvTlsServerAcceptor * acceptor)
+
+	lvExport MgErr lvtlsBeginServerAccept(lvasynctls::lvTlsServerAcceptor ** acceptor, LVUserEventRef * e, uint32_t requestID)
+	{
+		if (acceptor && *acceptor) {
+			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
+			try {
+				if (e && *e != kNotAMagicCookie) {
+					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
+				}
+				(*acceptor)->startAccept(cb);
+				return mgNoErr;
+			}
+			catch (...) {
+				delete cb;
+				cb = nullptr;
+
+				return 42;
+			}
+		}
+		else {
+			if (acceptor && *acceptor) {
+				return axEventQueueNotCreated;
+			}
+			else {
+				return oleNullRefnumPassed;
+			}
+		}
+	}
+
+	lvExport MgErr lvtlsDisposeConnectionCreator(lvasynctls::lvTlsConnectionCreator ** creator)
 	{
 		try {
-			if (acceptor) {
-				delete acceptor;
-				acceptor = nullptr;
+			if (creator) {
+				delete (*creator);
+				*creator = nullptr;
+
+				delete creator;
+				creator = nullptr;
+
 				return mgNoErr;
 			}
 			else {
@@ -290,39 +301,26 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsBeginServerAccept(lvasynctls::lvTlsServerAcceptor * acceptor, LVUserEventRef * e, uint32_t requestID)
+	lvExport lvasynctls::lvTlsSocketBase ** lvtlsPopAvailableConnection(lvasynctls::lvTlsConnectionCreator ** creator)
 	{
-		if (acceptor && e != nullptr && *e != kNotAMagicCookie) {
-			lvasyncapi::LVConnectionNotificationCallback * cb;
-			try {
-				cb = new lvasyncapi::LVConnectionNotificationCallback(e, lvasyncapi::lvRequestType::AcceptConnection, requestID);
-				acceptor->startAccept(cb);
-				return mgNoErr;
-			}
-			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
-				return 42;
-			}
-		}
-		else {
-			if (acceptor) {
-				return axEventQueueNotCreated;
+		if (creator && *creator) {
+			auto s = (*creator)->getNextConnection();
+			if (s) {
+				return new (lvasynctls::lvTlsSocketBase *)(s);
 			}
 			else {
-				return oleNullRefnumPassed;
+				return nullptr;
 			}
 		}
+		return nullptr;
 	}
 
 	//ssl context
-	lvExport MgErr lvtlsSetOptions(lvasynctls::lvTlsConnectionCreator * creator, long options)
+	lvExport MgErr lvtlsSetOptions(lvasynctls::lvTlsConnectionCreator ** creator, long options)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.set_options(options);
+				(*creator)->ctx.set_options(options);
 				return mgNoErr;
 			}
 			catch (...) 
@@ -335,11 +333,11 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetVerifymode(lvasynctls::lvTlsConnectionCreator* creator, int v)
+	lvExport MgErr lvtlsSetVerifymode(lvasynctls::lvTlsConnectionCreator** creator, int v)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.set_verify_mode(v);
+				(*creator)->ctx.set_verify_mode(v);
 				return mgNoErr;
 			}
 			catch (...)
@@ -352,12 +350,12 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetRfc2818Verification(lvasynctls::lvTlsConnectionCreator * creator, const char* host)
+	lvExport MgErr lvtlsSetRfc2818Verification(lvasynctls::lvTlsConnectionCreator** creator, const char* host)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string h(host);
-				creator->ctx.set_verify_callback(boost::asio::ssl::rfc2818_verification(h));
+				(*creator)->ctx.set_verify_callback(boost::asio::ssl::rfc2818_verification(h));
 				return mgNoErr;
 			}
 			catch (...)
@@ -370,12 +368,12 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsLoadVerifyFile(lvasynctls::lvTlsConnectionCreator* creator, const char* filename)
+	lvExport MgErr lvtlsLoadVerifyFile(lvasynctls::lvTlsConnectionCreator** creator, const char* filename)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string f(filename);
-				creator->ctx.load_verify_file(f);
+				(*creator)->ctx.load_verify_file(f);
 				return mgNoErr;
 			}
 			catch (...)
@@ -388,11 +386,11 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsAddCertificateauthority(lvasynctls::lvTlsConnectionCreator* creator, LStrHandle ca)
+	lvExport MgErr lvtlsAddCertificateauthority(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle ca)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.add_certificate_authority(boost::asio::const_buffer(LHStrBuf(ca), LHStrLen(ca)));
+				(*creator)->ctx.add_certificate_authority(boost::asio::const_buffer(LHStrBuf(ca), LHStrLen(ca)));
 				return mgNoErr;
 			}
 			catch (...)
@@ -405,11 +403,11 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetDefaultVerifyPaths(lvasynctls::lvTlsConnectionCreator* creator)
+	lvExport MgErr lvtlsSetDefaultVerifyPaths(lvasynctls::lvTlsConnectionCreator** creator)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.set_default_verify_paths();
+				(*creator)->ctx.set_default_verify_paths();
 				return mgNoErr;
 			}
 			catch (...)
@@ -422,12 +420,12 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsAddVerifyPath(lvasynctls::lvTlsConnectionCreator* creator, const char* path)
+	lvExport MgErr lvtlsAddVerifyPath(lvasynctls::lvTlsConnectionCreator** creator, const char* path)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string p(path);
-				creator->ctx.add_verify_path(p);
+				(*creator)->ctx.add_verify_path(p);
 				return mgNoErr;
 			}
 			catch (...)
@@ -440,11 +438,11 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseCertificate(lvasynctls::lvTlsConnectionCreator* creator, LStrHandle certificate, int format)
+	lvExport MgErr lvtlsUseCertificate(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle certificate, int format)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.use_certificate(boost::asio::const_buffer(LHStrBuf(certificate), LHStrLen(certificate)), static_cast<boost::asio::ssl::context_base::file_format>(format));
+				(*creator)->ctx.use_certificate(boost::asio::const_buffer(LHStrBuf(certificate), LHStrLen(certificate)), static_cast<boost::asio::ssl::context_base::file_format>(format));
 				return mgNoErr;
 			}
 			catch (...)
@@ -457,47 +455,12 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseCertificateFile(lvasynctls::lvTlsConnectionCreator* creator, const char* filename, int format)
+	lvExport MgErr lvtlsUseCertificateFile(lvasynctls::lvTlsConnectionCreator** creator, const char* filename, int format)
 	{
-		if (creator) {
-			try {
-				std::string f(filename);
-				creator->ctx.use_certificate_file(f, static_cast<boost::asio::ssl::context_base::file_format>(format));
-				return mgNoErr;
-			}
-			catch (...)
-			{
-				return 42;
-			}
-		}
-		else {
-			return oleNullRefnumPassed;
-		}
-	}
-
-	lvExport MgErr lvtlsUseCertificateChain(lvasynctls::lvTlsConnectionCreator* creator, LStrHandle chain)
-	{
-		if (creator) {
-			try {
-				creator->ctx.use_certificate_chain(boost::asio::const_buffer(LHStrBuf(chain), LHStrLen(chain)));
-				return mgNoErr;
-			}
-			catch (...)
-			{
-				return 42;
-			}
-		}
-		else {
-			return oleNullRefnumPassed;
-		}
-	}
-
-	lvExport MgErr lvtlsUseCertificateChainFile(lvasynctls::lvTlsConnectionCreator* creator, const char*  filename)
-	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string f(filename);
-				creator->ctx.use_certificate_chain_file(f);
+				(*creator)->ctx.use_certificate_file(f, static_cast<boost::asio::ssl::context_base::file_format>(format));
 				return mgNoErr;
 			}
 			catch (...)
@@ -510,11 +473,11 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUsePrivateKey(lvasynctls::lvTlsConnectionCreator* creator, LStrHandle privateKey, int format)
+	lvExport MgErr lvtlsUseCertificateChain(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle chain)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.use_private_key(boost::asio::const_buffer(LHStrBuf(privateKey), LHStrLen(privateKey)), static_cast<boost::asio::ssl::context_base::file_format>(format));
+				(*creator)->ctx.use_certificate_chain(boost::asio::const_buffer(LHStrBuf(chain), LHStrLen(chain)));
 				return mgNoErr;
 			}
 			catch (...)
@@ -527,12 +490,47 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUsePrivateKeyFile(lvasynctls::lvTlsConnectionCreator* creator, const char*  filename, int format)
+	lvExport MgErr lvtlsUseCertificateChainFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string f(filename);
-				creator->ctx.use_private_key_file(f, static_cast<boost::asio::ssl::context_base::file_format>(format));
+				(*creator)->ctx.use_certificate_chain_file(f);
+				return mgNoErr;
+			}
+			catch (...)
+			{
+				return 42;
+			}
+		}
+		else {
+			return oleNullRefnumPassed;
+		}
+	}
+
+	lvExport MgErr lvtlsUsePrivateKey(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle privateKey, int format)
+	{
+		if (creator && *creator) {
+			try {
+				(*creator)->ctx.use_private_key(boost::asio::const_buffer(LHStrBuf(privateKey), LHStrLen(privateKey)), static_cast<boost::asio::ssl::context_base::file_format>(format));
+				return mgNoErr;
+			}
+			catch (...)
+			{
+				return 42;
+			}
+		}
+		else {
+			return oleNullRefnumPassed;
+		}
+	}
+
+	lvExport MgErr lvtlsUsePrivateKeyFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename, int format)
+	{
+		if (creator && *creator) {
+			try {
+				std::string f(filename);
+				(*creator)->ctx.use_private_key_file(f, static_cast<boost::asio::ssl::context_base::file_format>(format));
 				return mgNoErr;
 			}
 			catch (boost::system::system_error e)
@@ -549,11 +547,11 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseRsaPrivateKey(lvasynctls::lvTlsConnectionCreator* creator, LStrHandle privateKey, int format)
+	lvExport MgErr lvtlsUseRsaPrivateKey(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle privateKey, int format)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.use_rsa_private_key(boost::asio::const_buffer(LHStrBuf(privateKey), LHStrLen(privateKey)), static_cast<boost::asio::ssl::context_base::file_format>(format));
+				(*creator)->ctx.use_rsa_private_key(boost::asio::const_buffer(LHStrBuf(privateKey), LHStrLen(privateKey)), static_cast<boost::asio::ssl::context_base::file_format>(format));
 				return mgNoErr;
 			}
 			catch (...)
@@ -566,12 +564,12 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseRsaPrivateKeyFile(lvasynctls::lvTlsConnectionCreator* creator, const char*  filename, int format)
+	lvExport MgErr lvtlsUseRsaPrivateKeyFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename, int format)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string f(filename);
-				creator->ctx.use_rsa_private_key_file(f, static_cast<boost::asio::ssl::context_base::file_format>(format));
+				(*creator)->ctx.use_rsa_private_key_file(f, static_cast<boost::asio::ssl::context_base::file_format>(format));
 				return mgNoErr;
 			}
 			catch (...)
@@ -584,11 +582,11 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseTmpDh(lvasynctls::lvTlsConnectionCreator* creator, LStrHandle dh)
+	lvExport MgErr lvtlsUseTmpDh(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle dh)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
-				creator->ctx.use_tmp_dh(boost::asio::const_buffer(LHStrBuf(dh), LHStrLen(dh)));
+				(*creator)->ctx.use_tmp_dh(boost::asio::const_buffer(LHStrBuf(dh), LHStrLen(dh)));
 				return mgNoErr;
 			}
 			catch (...)
@@ -601,12 +599,12 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseTmpDhFile(lvasynctls::lvTlsConnectionCreator* creator, const char*  filename)
+	lvExport MgErr lvtlsUseTmpDhFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string f(filename);
-				creator->ctx.use_tmp_dh_file(f);
+				(*creator)->ctx.use_tmp_dh_file(f);
 				return mgNoErr;
 			}
 			catch (boost::system::system_error se)
@@ -619,12 +617,12 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetFilePassword(lvasynctls::lvTlsConnectionCreator * creator, const char * pass)
+	lvExport MgErr lvtlsSetFilePassword(lvasynctls::lvTlsConnectionCreator** creator, const char * pass)
 	{
-		if (creator) {
+		if (creator && *creator) {
 			try {
 				std::string p(pass);
-				creator->enablePasswordCallback(p);
+				(*creator)->enablePasswordCallback(p);
 				return mgNoErr;
 			}
 			catch (...)
@@ -639,9 +637,12 @@ extern "C" {
 	
 
 	//socket stream
-	lvExport MgErr lvtlsCloseConnection(lvasynctls::lvTlsSocketBase * s)
+	lvExport MgErr lvtlsCloseConnection(lvasynctls::lvTlsSocketBase** s)
 	{
 		if (s) {
+			delete (*s);
+			*s = nullptr;
+
 			delete s;
 			s = nullptr;
 			return mgNoErr;
@@ -652,117 +653,53 @@ extern "C" {
 		return mgNoErr;
 	}
 
-	lvExport MgErr lvtlsBeginWrite(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, LStrHandle data, uint32_t requestID)
+	lvExport int64_t lvtlsBeginWrite(lvasynctls::lvTlsSocketBase ** s, LVUserEventRef * e, LStrHandle data, uint32_t requestID)
 	{
-		if (s && e && (*e) != kNotAMagicCookie && LHStrPtr(data) && LHStrBuf(data) && (LHStrLen(data) > 0)) {
-			lvasyncapi::LVNotificationCallback * cb = nullptr;
-			std::vector<unsigned char>* writeData;
+		if (s && *s && LHStrPtr(data) && LHStrBuf(data) && (LHStrLen(data) > 0)) {
+			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
 			try {
-				cb = new lvasyncapi::LVNotificationCallback(e, lvasyncapi::lvRequestType::StreamWrite, requestID);
-				writeData = new std::vector<unsigned char>();
-				writeData->assign(LHStrBuf(data), LHStrBuf(data) + LHStrLen(data));
-				//give data to write, which gives it to cb, which deallocs
-				s->startWrite(writeData, cb);
-				return mgNoErr;
+				if (e && *e != kNotAMagicCookie) {
+					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
+				}
+				//give data to write, which copies it
+				auto copied = (*s)->startWrite((char*)LHStrBuf(data), LHStrLen(data), cb);
+				
+				return copied;
 			}
 			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
-				if (writeData) {
-					delete writeData;
-					writeData = nullptr;
-				}
-
-				return 42;
 			}
+			//only reach this point on exception
+			try {
+				delete cb;
+				cb = nullptr;
+
+				return -2;
+			}
+			catch (...) {
+				return -3;
+			}
+
 		}
 		else {
-			return mgArgErr;
+			return -1;
 		}
 	}
 
-	lvExport MgErr lvtlsBeginDirectRead(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, size_t bytesToRead, uint32_t requestID)
+	lvExport MgErr lvtlsBeginStreamRead(lvasynctls::lvTlsSocketBase ** s, LVUserEventRef * e, size_t bytesToRead, uint32_t requestID)
 	{
-		if (s && e && (*e) != kNotAMagicCookie) {
-			lvasyncapi::LVNotificationCallback* cb = nullptr;
-			try {
-				auto cb = new lvasyncapi::LVNotificationCallback(e, lvasyncapi::lvRequestType::StreamRead, requestID);
-				s->startDirectRead(bytesToRead, cb);
-				return mgNoErr;
-			}
-			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
-				return 42;
-			}
-		}
-		else {
-			return mgArgErr;
-		}
-	}
-
-	lvExport MgErr lvtlsBeginDirectReadSome(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, size_t maxBytesToRead, uint32_t requestID)
-	{
-		if (s && e && (*e) != kNotAMagicCookie) {
-			lvasyncapi::LVNotificationCallback* cb = nullptr;
-			try {
-				auto cb = new lvasyncapi::LVNotificationCallback(e, lvasyncapi::lvRequestType::StreamRead, requestID);
-				s->startDirectReadSome(maxBytesToRead, cb);
-				return mgNoErr;
-			}
-			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
-				return 42;
-			}
-		}
-		else {
-			return mgArgErr;
-		}
-	}
-
-	lvExport MgErr lvtlsBeginDirectReadAtLeast(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, size_t minBytesToRead, size_t maxBytesToRead, uint32_t requestID)
-	{
-		if (s && e && (*e) != kNotAMagicCookie) {
-			lvasyncapi::LVNotificationCallback* cb = nullptr;
-			try {
-				auto cb = new lvasyncapi::LVNotificationCallback(e, lvasyncapi::lvRequestType::StreamRead, requestID);
-				s->startDirectReadAtLeast(minBytesToRead, maxBytesToRead, cb);
-				return mgNoErr;
-			}
-			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
-				return 42;
-			}
-		}
-		else {
-			return mgArgErr;
-		}
-	}
-
-	lvExport MgErr lvtlsBeginStreamRead(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, size_t bytesToRead, uint32_t requestID)
-	{
-		if (s && e && (*e) != kNotAMagicCookie) {
+		if (s && *s) {
 			lvasyncapi::LVCompletionNotificationCallback* cb = nullptr;
 			try {
-				auto cb = new lvasyncapi::LVCompletionNotificationCallback(e, lvasyncapi::lvRequestType::StreamRead, requestID);
-				s->startStreamRead(bytesToRead, cb);
+				if (e && *e != kNotAMagicCookie) {
+					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
+				}
+				(*s)->startStreamRead(bytesToRead, cb);
 				return mgNoErr;
 			}
 			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
+				delete cb;
+				cb = nullptr;
+
 				return 42;
 			}
 		}
@@ -771,63 +708,41 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsBeginStreamReadAtLeast(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, size_t minBytesToRead, size_t maxBytesToRead, uint32_t requestID)
+	lvExport MgErr lvtlsBeginStreamReadUntilTerm(lvasynctls::lvTlsSocketBase ** s, LVUserEventRef * e, LStrHandle termination, size_t maxBytesToRead, uint32_t requestID)
 	{
-		if (s && e && (*e) != kNotAMagicCookie) {
-			lvasyncapi::LVCompletionNotificationCallback* cb = nullptr;
-			try {
-				auto cb = new lvasyncapi::LVCompletionNotificationCallback(e, lvasyncapi::lvRequestType::StreamRead, requestID);
-				s->startStreamReadAtLeast(minBytesToRead, maxBytesToRead, cb);
-				return mgNoErr;
-			}
-			catch (...) {
-				if (cb) {
-					delete cb;
-					cb = nullptr;
-				}
-				return 42;
-			}
-		}
-		else {
-			return mgArgErr;
-		}
-	}
-
-	lvExport MgErr lvtlsBeginStreamReadUntilTerm(lvasynctls::lvTlsSocketBase * s, LVUserEventRef * e, LStrHandle termination, size_t maxBytesToRead, uint32_t requestID)
-	{
-		if (s && e && (*e) != kNotAMagicCookie && termination && LHStrPtr(termination)) {
+		if (s && *s && termination && LHStrPtr(termination)) {
 			lvasyncapi::LVCompletionNotificationCallback* cb = nullptr;
 			size_t termLen = LHStrLen(termination);
 			if (termLen > 0) {
 				try {
-					auto cb = new lvasyncapi::LVCompletionNotificationCallback(e, lvasyncapi::lvRequestType::StreamRead, requestID);
+					if (e && *e != kNotAMagicCookie) {
+						cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
+					}
 
 					if (termLen == 1) {
 						//single character
 						char termChar = LHStrBuf(termination)[0];
-						s->startStreamReadUntilTermChar(termChar, maxBytesToRead, cb);
+						(*s)->startStreamReadUntilTermChar(termChar, maxBytesToRead, cb);
 						return mgNoErr;
 					}
 					else if (termLen > 1) {
 						//multi-character
 						std::string termStr = LstrToStdStr(termination);
-						s->startStreamReadUntilTermString(termStr, maxBytesToRead, cb);
+						(*s)->startStreamReadUntilTermString(termStr, maxBytesToRead, cb);
 						return mgNoErr;
 					}
 					else {
 						//if we get to this point something bad happened
-						if (cb) {
-							delete cb;
-							cb = nullptr;
-						}
+						delete cb;
+						cb = nullptr;
+
 						return 42;
 					}					
 				}
 				catch (...) {
-					if (cb) {
-						delete cb;
-						cb = nullptr;
-					}
+					delete cb;
+					cb = nullptr;
+
 					return 42;
 				}
 			}
@@ -841,14 +756,19 @@ extern "C" {
 		}
 	}
 
-	lvExport size_t lvtlsGetInternalStreamSize(lvasynctls::lvTlsSocketBase * s)
+	lvExport size_t lvtlsGetInternalStreamSize(lvasynctls::lvTlsSocketBase ** s)
 	{
-		return s->getInputStreamSize();
+		if (s && *s) {
+			return (*s)->getInputStreamSize();
+		}
+		else {
+			return 0;
+		}
 	}
 
-	lvExport MgErr lvtlsInputStreamReadSome(lvasynctls::lvTlsSocketBase * s, LStrHandle buffer, size_t maxLen)
+	lvExport MgErr lvtlsInputStreamReadSome(lvasynctls::lvTlsSocketBase ** s, LStrHandle buffer, size_t maxLen)
 	{
-		if (s && buffer && maxLen > 0) {
+		if (s && *s && buffer && maxLen > 0) {
 			if (LHStrLen(buffer) != maxLen) {
 				//make sure handle is big enough to hold data
 				DSSetHandleSize(buffer, maxLen + sizeof(int32_t));
@@ -856,20 +776,66 @@ extern "C" {
 
 			char* bufPtr = (char *)(LHStrBuf(buffer));
 			try {
-				auto trueLen = s->inputStreamReadSome(bufPtr, maxLen);
+				auto trueLen = (*s)->inputStreamReadSome(bufPtr, maxLen);
 				DSSetHandleSize(buffer, trueLen + sizeof(int32_t));
 				LStrLen(LHStrPtr(buffer)) = trueLen;
 				return mgNoErr;
 			}
 			catch (...) {
 				DSSetHSzClr(buffer, sizeof(int32)); //truncate handle size to just length=0
+				return fIOErr;
 			}
 		}
 		else {
 			return mgArgErr;
 		}
+	}
 
-		return MgErr();
+	lvExport MgErr lvtlsInputStreamReadN(lvasynctls::lvTlsSocketBase ** s, LStrHandle buffer, size_t len)
+	{
+		if (s && *s && buffer && len > 0) {
+			if (LHStrLen(buffer) != len) {
+				//make sure handle is big enough to hold data
+				DSSetHandleSize(buffer, len + sizeof(int32_t));
+			}
+
+			try {
+				auto trueLen = (*s)->inputStreamReadN((char *)(LHStrBuf(buffer)), len);
+				DSSetHandleSize(buffer, trueLen + sizeof(int32_t));
+				LStrLen(LHStrPtr(buffer)) = trueLen;
+				return mgNoErr;
+			}
+			catch (...) {
+				DSSetHSzClr(buffer, sizeof(int32)); //truncate handle size to just length=0
+				return fIOErr;
+			}
+		}
+		else {
+			return mgArgErr;
+		}
+	}
+
+	lvExport MgErr lvtlsInputStreamReadLine(lvasynctls::lvTlsSocketBase ** s, LStrHandle buffer, size_t maxLen, char delimiter)
+	{
+		if (s && *s && buffer && maxLen > 0) {
+			if (LHStrLen(buffer) != maxLen) {
+				//make sure handle is big enough to hold data
+				DSSetHandleSize(buffer, maxLen + sizeof(int32_t));
+			}
+			try {
+				auto trueLen = (*s)->inputStreamGetLine((char *)(LHStrBuf(buffer)), maxLen, delimiter);
+				DSSetHandleSize(buffer, trueLen + sizeof(int32_t));
+				LStrLen(LHStrPtr(buffer)) = trueLen;
+				return mgNoErr;
+			}
+			catch (...) {
+				DSSetHSzClr(buffer, sizeof(int32)); //truncate handle size to just length=0
+				return fIOErr;
+			}
+		}
+		else {
+			return mgArgErr;
+		}
 	}
 
 

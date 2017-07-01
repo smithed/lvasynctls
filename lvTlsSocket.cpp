@@ -1,21 +1,51 @@
 #include "lvTlsSocket.h"
 #include "lvTlsCallbackBase.h"
 #include <vector>
+#include <thread>
+#include <chrono>
+#include <istream>
+#include <ostream>
+#include <boost/lockfree/spsc_queue.hpp>
 
-#ifndef LVSOCKETMAXREADSIZE
-#define LVSOCKETMAXREADSIZE 102400
-#endif
 
 using namespace boost::asio;
 
 namespace lvasynctls {
 
-	lvTlsSocketBase::lvTlsSocketBase(lvAsyncEngine* engineContext, boost::asio::ssl::context& sslContext) :
-		engineOwner(engineContext),
-		socketStrand(*(engineContext->getIOService())),
-		socket(*(engineContext->getIOService()), sslContext),
-		inputStreamBuffer{ LVSOCKETMAXREADSIZE },
-		inputStream{ &inputStreamBuffer }
+	class transferMinOrFull
+	{
+	public:
+		explicit transferMinOrFull(size_t minimum, boost::asio::streambuf & s)
+			: min(minimum), buf{ s }
+		{
+		}
+
+		std::size_t operator()(const boost::system::error_code & err, std::size_t bytes_transferred)
+		{
+			if (err || (bytes_transferred > min) || buf.size() == buf.max_size()) {
+				return 0;
+			}
+			else {
+				auto remain = min - bytes_transferred;
+				auto space = buf.max_size() - buf.size();
+				return ((remain > space) ? space : remain);
+			}
+			return 0;
+		}
+
+	private:
+		size_t min;
+		boost::asio::streambuf & buf;
+	};
+
+	lvTlsSocketBase::lvTlsSocketBase(lvAsyncEngine* engineContext, boost::asio::ssl::context& sslContext, size_t streamSize) :
+		engineOwner{ engineContext },
+		socketStrand{ *(engineContext->getIOService()) },
+		socket{ *(engineContext->getIOService()), sslContext },
+		inputStreamBuffer{ streamSize },
+		outputStreamBuffer{ streamSize }, 
+		inputStream{ &inputStreamBuffer },
+		outputStream{ &outputStreamBuffer }
 	{
 		if (engineContext) {
 			engineContext->registerSocket(this);
@@ -24,149 +54,126 @@ namespace lvasynctls {
 
 	lvTlsSocketBase::~lvTlsSocketBase()
 	{
+		//we are somewhat protected by the mutex in lvland, but this seems to be whats needed to avoid crashes and (more commonly) hangs
+		//https://stackoverflow.com/questions/32046034/what-is-the-proper-way-to-securely-disconnect-an-asio-ssl-socket
+		//https://stackoverflow.com/questions/22575315/how-to-gracefully-shutdown-a-boost-asio-ssl-client
+		//https://stackoverflow.com/questions/25587403/boost-asio-ssl-async-shutdown-always-finishes-with-an-error/25703699#25703699
+
+		boost::system::error_code ec;
+		try {
+			//cancel existing operations
+			socket.lowest_layer().cancel();
+			socket.lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
+		}
+		catch (...) {
+		}
+
+		try {
+			boost::lockfree::spsc_queue<int> q(1);
+
+			//start shutdown process
+			socket.async_shutdown(socketStrand.wrap(
+				[&q](const boost::system::error_code& ec) {
+					//we want this shutdown process to still be synchronous, we just want to force it a bit
+					//the queue lets us keep things synchronous
+					q.push(ec.value());
+				}
+			));
+
+			const char buffer[] = "";
+			boost::system::error_code wec;
+			//this write should immediately fail, allowing shutdown to complete
+			async_write(socket, boost::asio::buffer(buffer), socketStrand.wrap(
+				[](...) {
+					return;
+				}
+			));
+
+			//wait for shutdown to be complete
+			while (!q.pop()) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+		}
+		catch (...) {
+		}
+
+		try {
+			socket.lowest_layer().close();
+		}
+		catch (...) {
+		}
+
 		try {
 			if (engineOwner) {
 				engineOwner->unregisterSocket(this);
 			}
 		}
 		catch (...) {
-
-		}
-		try {
-			socket.lowest_layer().cancel();
-		}
-		catch (...) {
-
-		}
-		try {
-			socket.shutdown();
-		}
-		catch (...) {
-
 		}
 
 		return;
 	}
 
+	// WRITE
+
 	//take ownership of data buffer and of callback, we will dispose
-	void lvTlsSocketBase::startWrite(std::vector<unsigned char> * data, lvasynctls::lvTlsDataReadCallback * callback)
+	int64_t lvTlsSocketBase::startWrite(char * buffer, int64_t len, lvasynctls::lvTlsCallback * callback)
 	{
-		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBWriteComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, data, callback));
-		async_write(socket, boost::asio::buffer(*data), func);
+		auto sizeavailable = outputStreamBuffer.max_size() - outputStreamBuffer.size();
+		auto writesize = (sizeavailable > len) ? len : sizeavailable;
+
+		//apparently, insane as it may seem, there is no way to see how much was written?
+		for (int i = 0; i < writesize; i++) {
+			outputStream.put(buffer[i]);
+			if (outputStream.fail() || outputStream.bad() || outputStream.eof()) {
+				outputStream.clear();
+				writesize = i;
+				break;
+			}
+		}
+		
+		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBWriteComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
+		async_write(socket, outputStreamBuffer, transfer_at_least(writesize), func);
+
+		return writesize;
 	}
 
-	//take ownership of callback, we will dispose
-	void lvTlsSocketBase::startDirectRead(size_t len, lvasynctls::lvTlsDataReadCallback* callback)
+	//callback for completion of async write
+	void lvTlsSocketBase::CBWriteComplete(const boost::system::error_code & error, std::size_t bytes_transferred, lvasynctls::lvTlsCallback* callback)
 	{
 		if (callback) {
-			auto mem = new std::vector<unsigned char>(len);
-			callback->giveDataResult(mem);
-			auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-			async_read(socket, boost::asio::buffer(*mem), transfer_all(), func);
+			errorCheck(error, callback);
+			callback->execute();
+
+			delete callback;
+			callback = nullptr;
 		}
 	}
 
-	void lvTlsSocketBase::startDirectReadSome(size_t len, lvasynctls::lvTlsDataReadCallback * callback)
+	// READ
+		
+	void lvTlsSocketBase::startStreamReadUntilTermChar(unsigned char term, size_t max, lvasynctls::lvTlsCallback * callback)
 	{
-		if (callback) {
-			auto mem = new std::vector<unsigned char>(len);
-			callback->giveDataResult(mem);
-			auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-			socket.async_read_some(boost::asio::buffer(*mem), func);
-		}
+		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
+		async_read_until(socket, inputStreamBuffer, term, func);
 	}
 
-	void lvTlsSocketBase::startDirectReadAtLeast(size_t min, size_t max, lvasynctls::lvTlsDataReadCallback * callback)
+	void lvTlsSocketBase::startStreamReadUntilTermString(std::string term, size_t max, lvasynctls::lvTlsCallback * callback)
 	{
-		if (callback) {
-			auto mem = new std::vector<unsigned char>(max);
-			callback->giveDataResult(mem);
-			auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-			async_read(socket, boost::asio::buffer(*mem), transfer_at_least(min), func);
-		}
+		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
+		async_read_until(socket, inputStreamBuffer, term, func);
 	}
 
-
-	int32_t lvTlsSocketBase::startStreamReadUntilTermChar(unsigned char term, size_t max, lvasynctls::lvTlsCompletionCallback * callback)
+	void lvTlsSocketBase::startStreamRead(size_t len, lvasynctls::lvTlsCallback * callback)
 	{
-		if (callback) {
-			if (max > LVSOCKETMAXREADSIZE) {
-				return -1;
-			}
-			if (max <= inputStreamBuffer.size()) {
-				callback->setDataSize(max);
-				callback->execute();
-				return 0;
-			}
+		auto maxRead = inputStreamBuffer.max_size() - inputStreamBuffer.size();
+		auto readsize = (len > maxRead) ? maxRead : len;
 
-			auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-			async_read_until(socket, inputStreamBuffer, term, func);
-		}
-		return -2;
+		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
+		async_read(socket, inputStreamBuffer, transferMinOrFull(readsize, inputStreamBuffer), func);
 	}
 
-	int32_t lvTlsSocketBase::startStreamReadUntilTermString(std::string term, size_t max, lvasynctls::lvTlsCompletionCallback * callback)
-	{
-		if (callback) {
-			if (max > LVSOCKETMAXREADSIZE) {
-				return -1;
-			}
-			if (max <= inputStreamBuffer.size()) {
-				callback->setDataSize(max);
-				callback->execute();
-				return 0;
-			}
-
-			auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-			async_read_until(socket, inputStreamBuffer, term, func);
-		}
-		return -2;
-	}
-
-	int32_t lvTlsSocketBase::startStreamRead(size_t len, lvasynctls::lvTlsCompletionCallback * callback)
-	{
-		if (callback) {
-			if (len > LVSOCKETMAXREADSIZE) {
-				return -1;
-			}
-			if (len <= inputStreamBuffer.size()) {
-				callback->setDataSize(len);
-				callback->execute();
-				return 0;
-			}
-
-			auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-			async_read(socket, inputStreamBuffer, transfer_exactly(len - inputStreamBuffer.size()), func);
-		}
-		return -2;
-	}
-
-
-	int32_t lvTlsSocketBase::startStreamReadAtLeast(size_t min, size_t max, lvasynctls::lvTlsCompletionCallback * callback)
-	{
-		if (callback) {
-			if (min > LVSOCKETMAXREADSIZE) {
-				return -1;
-			}
-			if (min <= inputStreamBuffer.size()) {
-				callback->setDataSize(min);
-				callback->execute();
-				return 0;
-			}
-
-			auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-			async_read(socket, inputStreamBuffer, transfer_at_least(min - inputStreamBuffer.size()), func);
-		}
-		return -2;
-	}
-
-	void lvTlsSocketBase::startHandshake(lvasynctls::lvTlsNewConnectionCallback * callback, boost::asio::ssl::stream_base::handshake_type handType)
-	{
-		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBHandShakeComplete, this, boost::asio::placeholders::error, callback));
-		socket.async_handshake(handType, func);
-	}
-
-	size_t lvTlsSocketBase::getInputStreamSize()
+	int64_t lvTlsSocketBase::getInputStreamSize()
 	{
 		return inputStreamBuffer.size();
 	}
@@ -176,22 +183,40 @@ namespace lvasynctls {
 		return inputStream.readsome(buffer, len);
 	}
 
+	int64_t lvTlsSocketBase::inputStreamReadN(char * buffer, int64_t len)
+	{
+		inputStream.read(buffer, len);
+		if (inputStream.fail() || inputStream.bad() || inputStream.eof()) {
+			inputStream.clear();
+			return inputStream.gcount();
+		}
+		else {
+			return len;
+		}
+	}
+
+	int64_t lvTlsSocketBase::inputStreamGetLine(char * buffer, int64_t len, char delimiter)
+	{
+		inputStream.getline(buffer, len, delimiter);
+		if (inputStream.fail() || inputStream.bad() || inputStream.eof()) {
+			inputStream.clear();
+			return inputStream.gcount();
+		}
+		else {
+			return len;
+		}
+	}
+
 	boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& lvTlsSocketBase::getStream()
 	{
 		return socket;
 	}
 
-
-	void lvTlsSocketBase::CBWriteComplete(const boost::system::error_code & error, std::size_t bytes_transferred, std::vector<unsigned char> * data, lvasynctls::lvTlsDataReadCallback* callback)
+	void lvTlsSocketBase::CBReadStreamComplete(const boost::system::error_code & error, std::size_t bytes_transferred, lvasynctls::lvTlsCallback * callback)
 	{
-		//if this callback runs data has been transmitted, so free it
-		if (data) {
-			delete data;
-			data = nullptr;
-		}
-
 		if (callback) {
 			errorCheck(error, callback);
+
 			callback->execute();
 
 			delete callback;
@@ -199,54 +224,19 @@ namespace lvasynctls {
 		}
 	}
 
-	void lvTlsSocketBase::CBReadComplete(const boost::system::error_code & error, std::size_t bytes_transferred, lvasynctls::lvTlsDataReadCallback* callback)
+	//synchronous, dont mix with async
+	size_t lvTlsSocketBase::Write(std::vector<unsigned char> & data, boost::system::error_code & err)
 	{
-		if (callback) {
-			callback->resizeDataResult(bytes_transferred);
-
-			errorCheck(error, callback);
-
-			//because we gave data ptr to callback earlier, we don't have to do anything else
-			callback->execute();
-
-			//also frees data ptr
-			delete callback;
-			callback = nullptr;
-		}
+		return write(socket, boost::asio::buffer(data), err);
 	}
 
-	void lvTlsSocketBase::CBReadStreamComplete(const boost::system::error_code & error, std::size_t bytes_transferred, lvasynctls::lvTlsCompletionCallback * callback)
+	size_t lvTlsSocketBase::Read(std::vector<unsigned char> & data, boost::system::error_code & err)
 	{
-		if (callback) {
-			callback->setDataSize(bytes_transferred);
-
-			errorCheck(error, callback);
-
-			callback->execute();
-
-			//also frees data ptr
-			delete callback;
-			callback = nullptr;
-		}
+		return read(socket, boost::asio::buffer(data), err);
 	}
 
-	void lvTlsSocketBase::CBHandShakeComplete(const boost::system::error_code & error, lvasynctls::lvTlsNewConnectionCallback* callback)
+	size_t lvTlsSocketBase::ReadUntil(const std::string & term, boost::system::error_code & err)
 	{
-		if (callback) {
-			if (!error) {
-				callback->cacheSocket(this);
-			}
-
-			errorCheck(error, callback);
-			callback->execute();
-
-			delete callback;
-			callback = nullptr;
-			if (error) {
-				delete this;
-			}
-		}
+		return read_until(socket, inputStreamBuffer, term, err);
 	}
-
 }
-

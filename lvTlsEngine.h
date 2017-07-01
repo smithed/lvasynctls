@@ -4,6 +4,7 @@
 #include "lvTlsConnectionCreator.h"
 #include <unordered_set>
 #include <mutex>
+#include <memory>
 #include <boost/asio.hpp>
 #include <boost/thread.hpp>
 #include <boost/shared_ptr.hpp>
@@ -16,7 +17,7 @@ namespace lvasynctls {
 	class lvAsyncEngine {
 	public:
 		lvAsyncEngine();
-		lvAsyncEngine(std::size_t threadCount);
+		explicit lvAsyncEngine(std::size_t threadCount);
 		~lvAsyncEngine();
 		boost::shared_ptr<boost::asio::io_service> getIOService();
 
@@ -25,8 +26,6 @@ namespace lvasynctls {
 
 		void registerConnector(lvTlsConnectionCreator* connector);
 		std::size_t unregisterConnector(lvTlsConnectionCreator* connector);
-
-		void softShutdown();
 
 	private:
 		lvAsyncEngine(const lvAsyncEngine& that) = delete;
