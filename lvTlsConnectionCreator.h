@@ -26,7 +26,7 @@ namespace lvasynctls {
 
 		boost::asio::ssl::context ctx;
 	protected:
-		void completeHandshake(lvTlsSocketBase * newConnection, lvasynctls::lvTlsCallback * callback);
+		void completeHandshake(lvTlsSocketBase * newConnection, boost::asio::ssl::stream_base::handshake_type handType, lvasynctls::lvTlsCallback * callback);
 		
 		lvAsyncEngine* engineOwner;
 		boost::lockfree::queue<lvTlsSocketBase*, boost::lockfree::fixed_sized<true>> ConnQ;
@@ -48,15 +48,12 @@ namespace lvasynctls {
 		explicit lvTlsClientConnector(lvAsyncEngine* engineContext, size_t connectionQueueSize = 10);
 		~lvTlsClientConnector() override;
 
-		void resolveAndConnect(std::string host, std::string port, lvasynctls::lvTlsCallback * callback);
+		void resolveAndConnect(std::string host, std::string port, size_t streamSize, lvasynctls::lvTlsCallback * callback);
 
 	private:
 		lvTlsClientConnector() = delete;
 		lvTlsClientConnector(const lvTlsClientConnector& that) = delete;
 		const lvTlsClientConnector& operator=(const lvTlsClientConnector&) = delete;
-
-		void CBResolveToConnect(lvTlsSocketBase* newConnection, const boost::system::error_code& error, boost::asio::ip::tcp::resolver::iterator iterator, lvasynctls::lvTlsCallback* callback);
-		void CBConnectionEstablished(lvTlsSocketBase* newConnection, const boost::system::error_code& error, boost::asio::ip::tcp::resolver::iterator iterator, lvasynctls::lvTlsCallback* callback);
 
 		boost::asio::ip::tcp::resolver resolver;
 	};
@@ -67,14 +64,12 @@ namespace lvasynctls {
 		explicit lvTlsServerAcceptor(lvAsyncEngine* engineContext, unsigned short port, size_t connectionQueueSize = 10);
 		~lvTlsServerAcceptor() override;
 
-		void startAccept(lvasynctls::lvTlsCallback * callback);
+		void startAccept(size_t streamSize, lvasynctls::lvTlsCallback * callback);
 
 	private:
 		lvTlsServerAcceptor() = delete;
 		lvTlsServerAcceptor(const lvTlsServerAcceptor& that) = delete;
 		const lvTlsServerAcceptor& operator=(const lvTlsServerAcceptor&) = delete;
-
-		void CBConnectionAccepted(lvTlsSocketBase* newConnection, const boost::system::error_code& error, lvasynctls::lvTlsCallback * callback);
 
 		boost::asio::ip::tcp::acceptor serverAcceptor;
 	};

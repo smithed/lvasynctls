@@ -45,8 +45,8 @@ namespace lvasynctls {
 				
 				sockSnapshot = socketSet;
 				connSnapshot = connectorSet;
-				socketSet.empty();
-				connectorSet.empty();
+				socketSet.clear();
+				connectorSet.clear();
 			}
 
 			if (connSnapshot.size() > 0) {

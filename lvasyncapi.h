@@ -41,11 +41,11 @@ extern "C" {
 
 	//client
 	lvExport lvasynctls::lvTlsClientConnector** lvtlsCreateClientConnector(lvasynctls::lvAsyncEngine** engine);
-	lvExport MgErr lvtlsBeginClientConnect(lvasynctls::lvTlsClientConnector** client, LStrHandle host, LStrHandle port, LVUserEventRef * e, uint32_t requestID);
+	lvExport MgErr lvtlsBeginClientConnect(lvasynctls::lvTlsClientConnector** client, LStrHandle host, LStrHandle port, size_t bufferMaxSize, LVUserEventRef * e, uint32_t requestID);
 
 	//server
 	lvExport lvasynctls::lvTlsServerAcceptor** lvtlsCreateServerAcceptor(lvasynctls::lvAsyncEngine** engine, uint16_t port);
-	lvExport MgErr lvtlsBeginServerAccept(lvasynctls::lvTlsServerAcceptor** acceptor, LVUserEventRef * e, uint32_t requestID);
+	lvExport MgErr lvtlsBeginServerAccept(lvasynctls::lvTlsServerAcceptor** acceptor, size_t bufferMaxSize, LVUserEventRef * e, uint32_t requestID);
 	
 	//conn creator
 	lvExport MgErr lvtlsDisposeConnectionCreator(lvasynctls::lvTlsConnectionCreator** creator);

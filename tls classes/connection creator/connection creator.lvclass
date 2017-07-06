@@ -187,13 +187,13 @@
 	</Item>
 	<Item Name="object" Type="Folder">
 		<Item Name="dispose creator.vi" Type="VI" URL="../dispose creator.vi">
-			<Property Name="NI.ClassItem.ConnectorPane" Type="Bin">&amp;A#!!!!!!!)!"1!&amp;!!!-!%!!!@````]!!!!"!!%!!!$]!!!!#1!-1#%'=X2B&gt;(6T!!!,1!-!"'.P:'5!!""!-0````]'=W^V=G.F!!!71&amp;!!!Q!!!!%!!AFF=H*P=C"P&gt;81!"!!!!!V!#!!(='^J&lt;H2F=A!71&amp;!!!Q!!!!%!!ABF=H*P=C"J&lt;A!!0%"Q!"Y!!"Q;9W^O&lt;G6D&gt;'FP&lt;C"D=G6B&gt;'^S,GRW9WRB=X-!!"6D&lt;WZO:7.U;7^O)'.S:7&amp;U&lt;X)A;7Y!6!$Q!!Q!!Q!%!!5!"!!%!!1!"!!%!!9!"!!%!!=$!!"Y!!!.#!!!!!!!!!E!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!I!!!!!!!!!!!!!!"!!!!!!!1!)!!!!!!</Property>
+			<Property Name="NI.ClassItem.ConnectorPane" Type="Bin">&amp;A#!!!!!!!)!"1!&amp;!!!-!%!!!@````]!!!!"!!%!!!$P!!!!#!!-1#%'=X2B&gt;(6T!!!,1!-!"'.P:'5!!""!-0````]'=W^V=G.F!!!71&amp;!!!Q!!!!%!!AFF=H*P=C"P&gt;81!"!!!!":!5!!$!!!!!1!##'6S=G^S)'FO!!!]1(!!(A!!("JD&lt;WZO:7.U;7^O)'.S:7&amp;U&lt;X)O&lt;(:D&lt;'&amp;T=Q!!&amp;7.P&lt;GZF9X2J&lt;WYA9X*F982P=C"J&lt;A"5!0!!$!!$!!1!"!!%!!1!"!!%!!1!"1!%!!1!"A-!!(A!!!U)!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!#A!!!!!!!!!!!!!!%!!!!!!"!!=!!!!!</Property>
 			<Property Name="NI.ClassItem.ExecutionSystem" Type="Int">-1</Property>
-			<Property Name="NI.ClassItem.Flags" Type="Int">134217888</Property>
+			<Property Name="NI.ClassItem.Flags" Type="Int">150995072</Property>
 			<Property Name="NI.ClassItem.IsStaticMethod" Type="Bool">true</Property>
 			<Property Name="NI.ClassItem.MethodScope" Type="UInt">1</Property>
 			<Property Name="NI.ClassItem.Priority" Type="Int">1</Property>
-			<Property Name="NI.ClassItem.State" Type="Int">1082130960</Property>
+			<Property Name="NI.ClassItem.State" Type="Int">1342972432</Property>
 		</Item>
 		<Item Name="initialize creator.vi" Type="VI" URL="../initialize creator.vi">
 			<Property Name="NI.ClassItem.ConnectorPane" Type="Bin">&amp;A#!!!!!!!)!"1!&amp;!!!-!%!!!@````]!!!!"!!%!!!&amp;(!!!!#A!-1#%'=X2B&gt;(6T!!!,1!-!"'.P:'5!!""!-0````]'=W^V=G.F!!!71&amp;!!!Q!!!!%!!AFF=H*P=C"P&gt;81!"!!!!$Z!=!!?!!!='G.P&lt;GZF9X2J&lt;WYA9X*F982P=CZM&gt;G.M98.T!!!79W^O&lt;G6D&gt;'FP&lt;C"D=G6B&gt;'^S)'^V&gt;!!!&amp;E"1!!-!!!!"!!)):8*S&lt;X)A;7Y!!!V!#!!(='^J&lt;H2F=A!]1(!!(A!!("JD&lt;WZO:7.U;7^O)'.S:7&amp;U&lt;X)O&lt;(:D&lt;'&amp;T=Q!!&amp;7.P&lt;GZF9X2J&lt;WYA9X*F982P=C"J&lt;A"B!0!!$!!$!!1!"!!&amp;!!1!"!!%!!1!"A!%!!=!#!)!!(A!!!U)!!!!!!!!!!!!!!U,!!!!!!!!!!!!!!!!!!!!!!!!#A!!!!!!!!!3!!!!%A!!$1!!!!Q!!!!!!!!!!!!!!1!*!!!!!!</Property>
@@ -203,6 +203,15 @@
 			<Property Name="NI.ClassItem.MethodScope" Type="UInt">1</Property>
 			<Property Name="NI.ClassItem.Priority" Type="Int">1</Property>
 			<Property Name="NI.ClassItem.State" Type="Int">1082130944</Property>
+		</Item>
+		<Item Name="pop next connection.vi" Type="VI" URL="../pop next connection.vi">
+			<Property Name="NI.ClassItem.ConnectorPane" Type="Bin">&amp;A#!!!!!!!)!"1!&amp;!!!-!%!!!@````]!!!!"!!%!!!%&gt;!!!!#1!-1#%'=X2B&gt;(6T!!!,1!-!"'.P:'5!!""!-0````]'=W^V=G.F!!!71&amp;!!!Q!!!!%!!AFF=H*P=C"P&gt;81!"!!!!#Z!=!!?!!!5%G.P&lt;GZF9X2J&lt;WYO&lt;(:D&lt;'&amp;T=Q!!$G.P&lt;GZF9X2J&lt;WYA&lt;X6U!!!71&amp;!!!Q!!!!%!!ABF=H*P=C"J&lt;A!!0%"Q!"Y!!"Q;9W^O&lt;G6D&gt;'FP&lt;C"D=G6B&gt;'^S,GRW9WRB=X-!!"6D&lt;WZO:7.U;7^O)'.S:7&amp;U&lt;X)A;7Y!6!$Q!!Q!!Q!%!!1!"1!%!!1!"!!%!!9!"!!%!!=$!!"Y!!!.#!!!!!!!!!!!!!!*!!!!!!!!!!!!!!!!!!!!!!!!!!I!!!!!!!!!!!!!!"!!!!!!!1!)!!!!!!</Property>
+			<Property Name="NI.ClassItem.ExecutionSystem" Type="Int">-1</Property>
+			<Property Name="NI.ClassItem.Flags" Type="Int">134217728</Property>
+			<Property Name="NI.ClassItem.IsStaticMethod" Type="Bool">true</Property>
+			<Property Name="NI.ClassItem.MethodScope" Type="UInt">1</Property>
+			<Property Name="NI.ClassItem.Priority" Type="Int">1</Property>
+			<Property Name="NI.ClassItem.State" Type="Int">1342972432</Property>
 		</Item>
 		<Item Name="Read pointer.vi" Type="VI" URL="../Read pointer.vi">
 			<Property Name="NI.ClassItem.ConnectorPane" Type="Bin">&amp;A#!!!!!!!)!"1!&amp;!!!-!%!!!@````]!!!!"!!%!!!#]!!!!"1!%!!!!$5!)!!:F&lt;G&gt;J&lt;G5!!".!=!!A!!%!!1!(='^J&lt;H2F=A!]1(!!(A!!("JD&lt;WZO:7.U;7^O)'.S:7&amp;U&lt;X)O&lt;(:D&lt;'&amp;T=Q!!&amp;7.P&lt;GZF9X2J&lt;WYA9X*F982P=C"J&lt;A"5!0!!$!!!!!!!!A!!!!!!!!!!!!!!!!!!!!!!!Q)!!(A!!!!!!!!!!!!!#1!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!%!!!!!!"!!1!!!!!</Property>

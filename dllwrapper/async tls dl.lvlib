@@ -8,6 +8,7 @@
 
 </Property>
 	<Item Name="connector" Type="Folder">
+		<Property Name="NI.SortType" Type="Int">3</Property>
 		<Item Name="ssl context settings" Type="Folder">
 			<Item Name="context add certficate authority.vi" Type="VI" URL="../context add certficate authority.vi"/>
 			<Item Name="context add verify paths.vi" Type="VI" URL="../context add verify paths.vi"/>
@@ -30,31 +31,27 @@
 		</Item>
 		<Item Name="create client connector.vi" Type="VI" URL="../create client connector.vi"/>
 		<Item Name="create server acceptor.vi" Type="VI" URL="../create server acceptor.vi"/>
-		<Item Name="dispose client connector.vi" Type="VI" URL="../dispose client connector.vi"/>
-		<Item Name="dispose server acceptor.vi" Type="VI" URL="../dispose server acceptor.vi"/>
 		<Item Name="start client connect.vi" Type="VI" URL="../start client connect.vi"/>
 		<Item Name="start server accept.vi" Type="VI" URL="../start server accept.vi"/>
+		<Item Name="pop next connection.vi" Type="VI" URL="../pop next connection.vi"/>
+		<Item Name="dispose connection creator.vi" Type="VI" URL="../dispose connection creator.vi"/>
 	</Item>
 	<Item Name="engine" Type="Folder">
 		<Item Name="create engine.vi" Type="VI" URL="../create engine.vi"/>
+		<Item Name="create nthread engine.vi" Type="VI" URL="../create nthread engine.vi"/>
 		<Item Name="dispose engine.vi" Type="VI" URL="../dispose engine.vi"/>
 	</Item>
-	<Item Name="event types" Type="Folder">
-		<Item Name="tls action complete user event.ctl" Type="VI" URL="../tls action complete user event.ctl"/>
-		<Item Name="tls data user event.ctl" Type="VI" URL="../tls data user event.ctl"/>
-		<Item Name="tls new socket user event.ctl" Type="VI" URL="../tls new socket user event.ctl"/>
-	</Item>
 	<Item Name="socket" Type="Folder">
-		<Item Name="begin direct read at least.vi" Type="VI" URL="../begin direct read at least.vi"/>
-		<Item Name="begin direct read some.vi" Type="VI" URL="../begin direct read some.vi"/>
-		<Item Name="begin direct read.vi" Type="VI" URL="../begin direct read.vi"/>
+		<Property Name="NI.SortType" Type="Int">3</Property>
 		<Item Name="begin direct write.vi" Type="VI" URL="../begin direct write.vi"/>
-		<Item Name="begin stream read at least.vi" Type="VI" URL="../begin stream read at least.vi"/>
 		<Item Name="begin stream read until termination.vi" Type="VI" URL="../begin stream read until termination.vi"/>
 		<Item Name="begin stream read.vi" Type="VI" URL="../begin stream read.vi"/>
 		<Item Name="dispose socket.vi" Type="VI" URL="../dispose socket.vi"/>
 		<Item Name="get internal stream size.vi" Type="VI" URL="../get internal stream size.vi"/>
 		<Item Name="read from internal stream.vi" Type="VI" URL="../read from internal stream.vi"/>
+		<Item Name="read characters from internal stream.vi" Type="VI" URL="../read characters from internal stream.vi"/>
+		<Item Name="read line from internal stream.vi" Type="VI" URL="../read line from internal stream.vi"/>
 	</Item>
+	<Item Name="action complete event.ctl" Type="VI" URL="../action complete event.ctl"/>
 	<Item Name="library path.vi" Type="VI" URL="../library path.vi"/>
 </Library>

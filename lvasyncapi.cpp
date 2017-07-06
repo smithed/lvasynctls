@@ -1,9 +1,11 @@
 
 #include "lvasyncapi.h"
 #include <extcode.h>
-#include <boost/asio.hpp>
+#include <vector>
 #include <unordered_set>
-#include <boost/assert.hpp>
+#include <boost/asio.hpp>
+
+
 
 #ifndef lvExport
 #define lvExport __declspec(dllexport)
@@ -200,7 +202,8 @@ extern "C" {
 	}
 
 	lvExport MgErr lvtlsBeginClientConnect(lvasynctls::lvTlsClientConnector ** client,
-		LStrHandle host, LStrHandle port, LVUserEventRef * e, uint32_t requestID)
+		LStrHandle host, LStrHandle port, size_t bufferMaxSize,
+		LVUserEventRef * e, uint32_t requestID)
 	{
 		if (client && *client && LHStrPtr(host) && LHStrPtr(port) && LHStrBuf(host) && LHStrBuf(port)) {
 			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
@@ -208,7 +211,7 @@ extern "C" {
 				if (e && *e != kNotAMagicCookie) {
 					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
-				(*client)->resolveAndConnect(LstrToStdStr(host), LstrToStdStr(port), cb);
+				(*client)->resolveAndConnect(LstrToStdStr(host), LstrToStdStr(port), bufferMaxSize, cb);
 				return mgNoErr;
 			}
 			catch (...) {
@@ -252,7 +255,7 @@ extern "C" {
 	}
 
 
-	lvExport MgErr lvtlsBeginServerAccept(lvasynctls::lvTlsServerAcceptor ** acceptor, LVUserEventRef * e, uint32_t requestID)
+	lvExport MgErr lvtlsBeginServerAccept(lvasynctls::lvTlsServerAcceptor ** acceptor, size_t bufferMaxSize, LVUserEventRef * e, uint32_t requestID)
 	{
 		if (acceptor && *acceptor) {
 			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
@@ -260,7 +263,7 @@ extern "C" {
 				if (e && *e != kNotAMagicCookie) {
 					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
-				(*acceptor)->startAccept(cb);
+				(*acceptor)->startAccept(bufferMaxSize, cb);
 				return mgNoErr;
 			}
 			catch (...) {
@@ -656,13 +659,16 @@ extern "C" {
 	lvExport int64_t lvtlsBeginWrite(lvasynctls::lvTlsSocketBase ** s, LVUserEventRef * e, LStrHandle data, uint32_t requestID)
 	{
 		if (s && *s && LHStrPtr(data) && LHStrBuf(data) && (LHStrLen(data) > 0)) {
+			auto dataVec = new std::vector<unsigned char>(LHStrLen(data));
+			//mem cpy
+			dataVec->assign(LHStrBuf(data), LHStrBuf(data) + LHStrLen(data));
+
 			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
 			try {
 				if (e && *e != kNotAMagicCookie) {
 					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
-				//give data to write, which copies it
-				auto copied = (*s)->startWrite((char*)LHStrBuf(data), LHStrLen(data), cb);
+				auto copied = (*s)->startWrite(dataVec, cb);
 				
 				return copied;
 			}

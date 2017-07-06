@@ -2,7 +2,10 @@
 #include "lvTlsSocket.h"
 #include <extcode.h>
 
+static const LStrHandle emptyStr = (LStrHandle)DSNewHClr(sizeof(int32_t));
+
 namespace lvasyncapi {
+	
 	//op complete callback
 	LVCompletionNotificationCallback::LVCompletionNotificationCallback(LVUserEventRef * lvevent, uint32_t requestID) : 
 		lvasynctls::lvTlsCallback{}, id{ requestID }, e{ lvevent }, errorCode{ 0 }, errorMessage{ "" }
@@ -19,15 +22,16 @@ namespace lvasyncapi {
 			lvCompleteEventType eventData;
 			eventData.requestID = id;
 			eventData.errorCode = errorCode;
+			eventData.errorData = nullptr;
 			if (errorCode != 0) {
 				//error condition
 				eventData.errorData = (LStrHandle)DSNewHandle(errorMessage.size() + sizeof(int32_t));
 				LStrLen(LHStrPtr(eventData.errorData)) = errorMessage.size();
 				MoveBlock(errorMessage.data(), LHStrBuf(eventData.errorData), errorMessage.size());
 			}
-			else {
-				eventData.errorData = (LStrHandle)DSNewHClr(sizeof(int32_t)); //size 0
-			}
+			/*else {
+				eventData.errorData = emptyStr;
+			}*/
 
 			auto err = PostLVUserEvent(*e, (void *)(&eventData));
 

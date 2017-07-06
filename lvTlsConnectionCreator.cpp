@@ -53,10 +53,10 @@ namespace lvasynctls {
 		return nullptr;
 	}
 
-	void lvTlsConnectionCreator::completeHandshake(lvTlsSocketBase * newConnection, lvasynctls::lvTlsCallback * callback)
+	void lvTlsConnectionCreator::completeHandshake(lvTlsSocketBase * newConnection, boost::asio::ssl::stream_base::handshake_type handType, lvasynctls::lvTlsCallback * callback)
 	{
 		boost::system::error_code ecref;
-		auto ecret = newConnection->getStream().handshake(boost::asio::ssl::stream_base::client, ecref);
+		auto ecret = newConnection->getStream().handshake(handType, ecref);
 
 		if (ecref || ecret) {
 			if (ecret) errorCheck(ecref, callback);
@@ -101,68 +101,58 @@ namespace lvasynctls {
 		return;
 	}
 
-	void lvTlsClientConnector::resolveAndConnect(std::string host, std::string port, lvasynctls::lvTlsCallback * callback)
+	void lvTlsClientConnector::resolveAndConnect(std::string host, std::string port, size_t streamSize, lvasynctls::lvTlsCallback * callback)
 	{
 		ip::tcp::resolver::query resolveQuery(host, port);
-		auto newConnection = new lvTlsSocketBase(engineOwner, ctx);
-		auto func = boost::bind(&lvTlsClientConnector::CBResolveToConnect,this, newConnection, placeholders::error, placeholders::iterator, callback);
-		resolver.async_resolve(resolveQuery, func);
+		auto newConnection = new lvTlsSocketBase(engineOwner, ctx, streamSize);
+
+		resolver.async_resolve(resolveQuery, 
+			[this, newConnection, callback] (const boost::system::error_code& error, ip::tcp::resolver::iterator iterator) mutable {
+				if (error) {
+					if (callback) {
+						errorCheck(error, callback);
+						callback->execute();
+
+						delete callback;
+						callback = nullptr;
+					}
+					if (newConnection) {
+						delete newConnection;
+						newConnection = nullptr;
+					}
+					return;
+				}
+				if (newConnection) {
+					async_connect((newConnection->getStream()).lowest_layer(), iterator, 
+						[this, newConnection, callback](const boost::system::error_code& error, ip::tcp::resolver::iterator iterator) mutable {
+							if (error || !newConnection) {
+								if (callback) {
+									errorCheck(error, callback);
+									callback->execute();
+
+									delete callback;
+									callback = nullptr;
+								}
+								if (newConnection) {
+									delete newConnection;
+									newConnection = nullptr;
+								}
+								return;
+							}
+							else {
+								completeHandshake(newConnection, boost::asio::ssl::stream_base::client, callback);
+								return;
+							}
+						}
+					);
+				}
+				else if (callback) {
+					callback->execute();
+					delete callback;
+					callback = nullptr;
+				}
+		});
 	}
-
-	//connect 1 of 3: resolved host/port
-	void lvTlsClientConnector::CBResolveToConnect(lvTlsSocketBase* newConnection,
-		const boost::system::error_code& error, ip::tcp::resolver::iterator iterator,
-		lvasynctls::lvTlsCallback* callback)
-	{
-		if (error) {
-			if (callback) {
-				errorCheck(error, callback);
-				callback->execute();
-
-				delete callback;
-				callback = nullptr;
-			}
-			if (newConnection) {
-				delete newConnection;
-				newConnection = nullptr;
-			}
-			return;
-		}
-		auto func = boost::bind(&lvTlsClientConnector::CBConnectionEstablished, this, newConnection, boost::asio::placeholders::error, boost::asio::placeholders::iterator, callback);
-		if (newConnection && callback) {
-			async_connect((newConnection->getStream()).lowest_layer(), iterator, func);
-		}
-		else if (callback) {
-				callback->execute();
-				delete callback;
-				callback = nullptr;
-		}
-		
-	}
-
-	//connect 2 of 3: connected to target, need to init tls (next step is handshake)
-	void lvTlsClientConnector::CBConnectionEstablished(lvTlsSocketBase* newConnection, const boost::system::error_code& error, ip::tcp::resolver::iterator iterator, lvasynctls::lvTlsCallback* callback)
-	{
-		if (error || !newConnection) {
-			if (callback) {
-				errorCheck(error, callback);
-				callback->execute();
-
-				delete callback;
-				callback = nullptr;
-			}
-			if (newConnection) {
-				delete newConnection;
-				newConnection = nullptr;
-			}
-			return;
-		}
-		else {
-			completeHandshake(newConnection, callback);
-			return;
-		}
-	}
-
 
 
 	//server acceptor
@@ -174,51 +164,46 @@ namespace lvasynctls {
 
 	lvTlsServerAcceptor::~lvTlsServerAcceptor()
 	{
-		try {
-			serverAcceptor.cancel();
-		}
-		catch (...) {
-		}
-		try {
-			serverAcceptor.close();
-		}
-		catch (...) {
-		}
+		boost::system::error_code ec;
+		serverAcceptor.cancel(ec);
+		serverAcceptor.close(ec);
 	}
 
-	void lvTlsServerAcceptor::startAccept(lvasynctls::lvTlsCallback * callback)
+	void lvTlsServerAcceptor::startAccept(size_t streamSize, lvasynctls::lvTlsCallback * callback)
 	{
-		auto newConnection = new lvTlsSocketBase(engineOwner, ctx);
+		auto newConnection = new lvTlsSocketBase(engineOwner, ctx, streamSize);
 		if (newConnection && callback) {
+			//serverAcceptor.async_accept(newConnection->getStream().lowest_layer(),boost::bind(&lvTlsServerAcceptor::CBConnectionAccepted, this, newConnection, boost::asio::placeholders::error, callback));
+			
+			//replace with lambda
 			serverAcceptor.async_accept(newConnection->getStream().lowest_layer(),
-				boost::bind(&lvTlsServerAcceptor::CBConnectionAccepted, this, newConnection, boost::asio::placeholders::error, callback));
+				[this, newConnection, callback](const boost::system::error_code & error) mutable {
+					if (error || !newConnection) {
+						if (callback) {
+							errorCheck(error, callback);
+							callback->execute();
+
+							delete callback;
+							callback = nullptr;
+						}
+						if (newConnection) {
+							delete newConnection;
+							newConnection = nullptr;
+						}
+						return;
+					}
+					else {
+						completeHandshake(newConnection, boost::asio::ssl::stream_base::server, callback);
+						return;
+					}
+				}
+			);
+
 			return;
 		}
 		else if (callback) {
 			delete callback;
 			callback = nullptr;
-		}
-	}
-
-	void lvTlsServerAcceptor::CBConnectionAccepted(lvTlsSocketBase * newConnection, const boost::system::error_code & error, lvasynctls::lvTlsCallback * callback)
-	{
-		if (error || !newConnection) {
-			if (callback) {
-				errorCheck(error, callback);
-				callback->execute();
-
-				delete callback;
-				callback = nullptr;
-			}
-			if (newConnection) {
-				delete newConnection;
-				newConnection = nullptr;
-			}
-			return;
-		}
-		else {
-			completeHandshake(newConnection, callback);
-			return;
 		}
 	}
 

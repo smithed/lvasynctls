@@ -3,6 +3,9 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <queue>
+#include <mutex>
+#include <functional>
 #include <istream>
 #include <ostream>
 #include <boost/lockfree/spsc_queue.hpp>
@@ -12,40 +15,19 @@ using namespace boost::asio;
 
 namespace lvasynctls {
 
-	class transferMinOrFull
-	{
-	public:
-		explicit transferMinOrFull(size_t minimum, boost::asio::streambuf & s)
-			: min(minimum), buf{ s }
-		{
-		}
-
-		std::size_t operator()(const boost::system::error_code & err, std::size_t bytes_transferred)
-		{
-			if (err || (bytes_transferred > min) || buf.size() == buf.max_size()) {
-				return 0;
-			}
-			else {
-				auto remain = min - bytes_transferred;
-				auto space = buf.max_size() - buf.size();
-				return ((remain > space) ? space : remain);
-			}
-			return 0;
-		}
-
-	private:
-		size_t min;
-		boost::asio::streambuf & buf;
-	};
-
 	lvTlsSocketBase::lvTlsSocketBase(lvAsyncEngine* engineContext, boost::asio::ssl::context& sslContext, size_t streamSize) :
 		engineOwner{ engineContext },
 		socketStrand{ *(engineContext->getIOService()) },
 		socket{ *(engineContext->getIOService()), sslContext },
+		socketErr{ 0 },
+		iSLock{},
+		inputRunning{ false },
+		inQueue{},
 		inputStreamBuffer{ streamSize },
-		outputStreamBuffer{ streamSize }, 
 		inputStream{ &inputStreamBuffer },
-		outputStream{ &outputStreamBuffer }
+		oQLock{},
+		outputRunning{ false },
+		outQueue{}
 	{
 		if (engineContext) {
 			engineContext->registerSocket(this);
@@ -59,19 +41,97 @@ namespace lvasynctls {
 		//https://stackoverflow.com/questions/22575315/how-to-gracefully-shutdown-a-boost-asio-ssl-client
 		//https://stackoverflow.com/questions/25587403/boost-asio-ssl-async-shutdown-always-finishes-with-an-error/25703699#25703699
 
+		int noErr = 0;
+		int abortSock = LVTLSSOCKETERRFLAGABORT;
+		//set socket error flag if it wasn't set already
+		socketErr.compare_exchange_strong(noErr, abortSock);
+
 		boost::system::error_code ec;
-		try {
-			//cancel existing operations
-			socket.lowest_layer().cancel();
-			socket.lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_receive);
-		}
-		catch (...) {
+		bool run = true;
+		//stop all ongoing write operations
+		while (run) {
+
+			try {
+				//cancel existing operations
+				socket.lowest_layer().cancel(ec);
+				socket.lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_receive, ec);
+			}
+			catch (...) {
+			}
+
+			{
+				std::lock_guard<std::mutex> lg(oQLock);
+				
+				while (!outQueue.empty()) {
+					//properly clean up queue elements
+					auto temp = outQueue.front();
+
+					delete temp.chunkdata;
+
+					if (temp.optcallback) {
+						temp.optcallback->setErrorCondition(1000, "socket shut down");
+						temp.optcallback->execute();
+						delete temp.optcallback;
+					}
+									
+
+					outQueue.pop();
+				}
+
+				//hopefully by now all write functions have exited, if not: loop
+				run = outputRunning;
+			}
+
+
+			if (run) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1)); //yield
+			}
 		}
 
+		run = true;
+
+		//stop all ongoing read operations
+		while (run) {
+
+			try {
+				//cancel existing operations
+				socket.lowest_layer().cancel(ec);
+				socket.lowest_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_receive, ec);
+			}
+			catch (...) {
+			}
+
+			{
+				std::lock_guard<std::mutex> lg(iSLock);
+
+				while (!inQueue.empty()) {
+					//properly clean up queue elements
+					auto temp = inQueue.front();
+
+					if (temp.optcallback) {
+						temp.optcallback->setErrorCondition(1000, "socket shut down");
+						temp.optcallback->execute();
+						delete temp.optcallback;
+					}
+
+					inQueue.pop();
+				}
+
+				//hopefully by now all read functions have exited, if not: loop
+				run = inputRunning;
+			}
+
+
+			if (run) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(1)); //yield
+			}
+		}
+
+		
 		try {
 			boost::lockfree::spsc_queue<int> q(1);
 
-			//start shutdown process
+			//start shutdown process, this hack brought to you by stack overflow. Async shutdown blocks until data moves...
 			socket.async_shutdown(socketStrand.wrap(
 				[&q](const boost::system::error_code& ec) {
 					//we want this shutdown process to still be synchronous, we just want to force it a bit
@@ -80,18 +140,20 @@ namespace lvasynctls {
 				}
 			));
 
-			const char buffer[] = "";
+			//so then we move some data with an async write
+			const char buffer[] = "\0";
 			boost::system::error_code wec;
 			//this write should immediately fail, allowing shutdown to complete
 			async_write(socket, boost::asio::buffer(buffer), socketStrand.wrap(
 				[](...) {
+				//ignore anything that happens here
 					return;
 				}
 			));
 
 			//wait for shutdown to be complete
 			while (!q.pop()) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				std::this_thread::sleep_for(std::chrono::milliseconds(5)); //yield
 			}
 		}
 		catch (...) {
@@ -116,62 +178,259 @@ namespace lvasynctls {
 
 	// WRITE
 
-	//take ownership of data buffer and of callback, we will dispose
-	int64_t lvTlsSocketBase::startWrite(char * buffer, int64_t len, lvasynctls::lvTlsCallback * callback)
-	{
-		auto sizeavailable = outputStreamBuffer.max_size() - outputStreamBuffer.size();
-		auto writesize = (sizeavailable > len) ? len : sizeavailable;
-
-		//apparently, insane as it may seem, there is no way to see how much was written?
-		for (int i = 0; i < writesize; i++) {
-			outputStream.put(buffer[i]);
-			if (outputStream.fail() || outputStream.bad() || outputStream.eof()) {
-				outputStream.clear();
-				writesize = i;
-				break;
+	void lvTlsSocketBase::writeAction() {
+		outputChunk wd{ nullptr, nullptr };
+		int err = socketErr;
+		bool success = false;
+		{
+			std::lock_guard<std::mutex> lg(oQLock);
+			if ((0 == err) && (outQueue.size() >= 1)) {
+				//preview the queue, this lets any other enqueuers know they don't need to start a write action
+				wd = outQueue.front();
+				success = true;
 			}
 		}
-		
-		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBWriteComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-		async_write(socket, outputStreamBuffer, transfer_at_least(writesize), func);
 
-		return writesize;
+		if (success) {
+			async_write(socket, buffer(*(wd.chunkdata)), socketStrand.wrap(
+				[this](const boost::system::error_code & error, std::size_t bytes_transferred) mutable {
+				size_t sz = 0;
+				std::vector<unsigned char> * data = nullptr;
+				lvasynctls::lvTlsCallback * callback = nullptr;
+				{
+					//ok, now we've started the write action lets pop
+					std::lock_guard<std::mutex> lg(oQLock);
+					sz = outQueue.size();
+					if (sz > 0) {
+						auto wd = outQueue.front();
+						data = wd.chunkdata;
+						callback = wd.optcallback;
+						outQueue.pop();
+					}
+					if (!error && (0 == socketErr) && (sz > 1) && engineOwner) {
+						//socket is still OK, this request succeeded, and there is more work to do
+						(engineOwner->getIOService())->post([this]() mutable { writeAction(); });
+					}
+					else {
+						outputRunning = false;
+						if (error) {
+							int noErr = 0;
+							int code = error.value();
+							//set socket error flag, eventually killing all operations on the socket.
+							socketErr.compare_exchange_strong(noErr, code);
+						}
+					}
+				}
+
+
+				if (callback) {
+					errorCheck(error, callback);
+					callback->execute();
+
+					delete callback;
+					callback = nullptr;
+				}
+				if (data) {
+					delete data;
+					data = nullptr;
+				}
+
+			}
+			));
+
+		}
+		return;
 	}
 
-	//callback for completion of async write
-	void lvTlsSocketBase::CBWriteComplete(const boost::system::error_code & error, std::size_t bytes_transferred, lvasynctls::lvTlsCallback* callback)
+	//take ownership of data buffer and of callback, we will dispose
+	//return: (-2, socket dead), (-1, no data-arg err), (0, no space), (1, success, is enqueued), (2, success, will run next)
+	int lvTlsSocketBase::startWrite(std::vector<unsigned char> * data, lvasynctls::lvTlsCallback * callback)
 	{
-		if (callback) {
-			errorCheck(error, callback);
-			callback->execute();
+		//general gist of problem and solution is here: https://stackoverflow.com/questions/7754695/boost-asio-async-write-how-to-not-interleaving-async-write-calls
+		if (data) {
+			outputChunk wd{ data, callback };
+			bool success = false;
+			{
+				std::lock_guard<std::mutex> lg(oQLock);
+				int err = socketErr;
+				auto qsz = outQueue.size();
+				if (qsz >= 100) {
+					//too many elements, dont' enqueue
+					return 0;
+				}
+				else if (err != 0) {
+					//socket should be dead
+					return -2;
+				}
+				outQueue.push(wd);
+				success = true;
 
-			delete callback;
-			callback = nullptr;
+				
+				if (!outputRunning && (0 == err)) {
+					outputRunning = true;
+					//when we got the lock the output wasnt running, so we need to start the write operation
+					if (engineOwner) {
+						(engineOwner->getIOService())->post([this]() mutable { writeAction(); });
+					}
+					return 2;
+				}
+				else if (0 == err) {
+					//someone else is taking care of it
+					return 1;
+				}
+				else {
+					return -2;
+				}
+			}
 		}
+		return -1;
 	}
 
 	// READ
 		
-	void lvTlsSocketBase::startStreamReadUntilTermChar(unsigned char term, size_t max, lvasynctls::lvTlsCallback * callback)
+	int lvTlsSocketBase::startStreamReadUntilTermChar(unsigned char term, size_t max, lvasynctls::lvTlsCallback * callback)
 	{
-		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-		async_read_until(socket, inputStreamBuffer, term, func);
+		inputChunk ind { 
+			[this, term, max, callback](readOperationFinalize finalizer) {
+				async_read_until(socket, inputStreamBuffer, term, finalizer);
+			}, 
+			callback 
+		};
+		return startReadCore(ind);
 	}
 
-	void lvTlsSocketBase::startStreamReadUntilTermString(std::string term, size_t max, lvasynctls::lvTlsCallback * callback)
+	int lvTlsSocketBase::startStreamReadUntilTermString(std::string term, size_t max, lvasynctls::lvTlsCallback * callback)
 	{
-		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-		async_read_until(socket, inputStreamBuffer, term, func);
+		inputChunk ind{ 
+			[this, term, max, callback](readOperationFinalize finalizer) {
+				async_read_until(socket, inputStreamBuffer, term, finalizer);
+			}, 
+			callback 
+		};
+		return startReadCore(ind);
 	}
 
-	void lvTlsSocketBase::startStreamRead(size_t len, lvasynctls::lvTlsCallback * callback)
+	int lvTlsSocketBase::startStreamRead(size_t len, lvasynctls::lvTlsCallback * callback)
 	{
-		auto maxRead = inputStreamBuffer.max_size() - inputStreamBuffer.size();
-		auto readsize = (len > maxRead) ? maxRead : len;
-
-		auto func = socketStrand.wrap(boost::bind(&lvTlsSocketBase::CBReadStreamComplete, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred, callback));
-		async_read(socket, inputStreamBuffer, transferMinOrFull(readsize, inputStreamBuffer), func);
+		inputChunk ind{ 
+			[this, len, callback](readOperationFinalize finalizer) {
+				auto maxRead = inputStreamBuffer.max_size() - inputStreamBuffer.size();
+				auto readsize = (len > maxRead) ? maxRead : len;
+				async_read(socket, inputStreamBuffer, 
+					[this, readsize](const boost::system::error_code & err, std::size_t bytes_transferred) -> std::size_t
+					{
+						if (err || (bytes_transferred > readsize) || inputStreamBuffer.size() == inputStreamBuffer.max_size()) {
+							return 0;
+						}
+						else {
+							auto remain = readsize - bytes_transferred;
+							auto space = inputStreamBuffer.max_size() - inputStreamBuffer.size();
+							return ((remain > space) ? space : remain);
+						}
+						return 0;
+					},
+					finalizer);
+			},
+			callback 
+		};
+		return startReadCore(ind);
 	}
+
+	void lvasynctls::lvTlsSocketBase::readAction()
+	{
+		bool success = false;
+		inputChunk ind;
+		{
+			std::lock_guard<std::mutex> lg(iSLock);
+			if ((0 == socketErr) && (inQueue.size() >= 1)) {
+				//preview the queue to make sure something is avail
+				ind = inQueue.front();
+				success = true;
+			}
+		}
+
+		if (success) {
+			ind.op(
+				[this](const boost::system::error_code & error, std::size_t bytes_transferred) mutable
+				{
+					size_t sz = 0;
+					lvasynctls::lvTlsCallback* cb = nullptr;
+					{
+						//ok, now we've finished the read action lets pop
+						std::lock_guard<std::mutex> lg(iSLock);
+						sz = inQueue.size();
+						if (sz > 0) {
+							auto ind = inQueue.front();
+							cb = ind.optcallback;
+							inQueue.pop();
+						}
+						
+						if (!error && (0 == socketErr) && (sz > 1)) {
+							//if there is still work to do and an error did not occur at this time
+							if (engineOwner) {
+								//push this function back on the run queue
+								(engineOwner->getIOService())->post([this]() mutable { readAction(); });
+							}
+						}
+						else {
+							//we're going to stop working, so set inputRunning to false to signal that the next read should start it up
+							inputRunning = false;
+							if (error) {
+								//set error flag so other operations quit
+								int noErr = 0;
+								int eVal = error.value();
+								socketErr.compare_exchange_strong(noErr, eVal);
+							}
+						}
+					}
+
+					//run final user callback if it wasn't already killed by socket closing
+					if (cb) {
+						errorCheck(error, cb);
+						cb->execute();
+
+						delete cb;
+						cb = nullptr;
+					}
+				}
+			);
+		}
+		return;
+	}
+
+	//core function for all reads, although considering how many lambdas are involved it might not be worth it...
+	//return: (-2, socket dead), (-1, no data-arg err), (0, no space), (1, success, is enqueued), (2, success, will run next)
+	int lvasynctls::lvTlsSocketBase::startReadCore(inputChunk inChunk)
+	{
+		//general gist of problem and solution is here: https://stackoverflow.com/questions/7754695/boost-asio-async-write-how-to-not-interleaving-async-write-calls
+		{
+			std::lock_guard<std::mutex> lg(iSLock);
+
+			if (0 == socketErr) {
+
+				inQueue.push(inChunk);
+			
+				if (!inputRunning) {
+					inputRunning = true;
+					//when we got the lock the input wasnt running, so we need to start the read operation
+					if (engineOwner) {
+						(engineOwner->getIOService())->post([this]() mutable { readAction(); });
+					}
+					return 2;
+				}
+				else {
+					//someone else is taking care of it
+					return 1;
+				}
+			}
+			else {
+				return -2;
+			}
+		}
+		return 0;
+	}
+
+	//streams
 
 	int64_t lvTlsSocketBase::getInputStreamSize()
 	{
@@ -212,31 +471,9 @@ namespace lvasynctls {
 		return socket;
 	}
 
-	void lvTlsSocketBase::CBReadStreamComplete(const boost::system::error_code & error, std::size_t bytes_transferred, lvasynctls::lvTlsCallback * callback)
+	int lvTlsSocketBase::getError()
 	{
-		if (callback) {
-			errorCheck(error, callback);
-
-			callback->execute();
-
-			delete callback;
-			callback = nullptr;
-		}
-	}
-
-	//synchronous, dont mix with async
-	size_t lvTlsSocketBase::Write(std::vector<unsigned char> & data, boost::system::error_code & err)
-	{
-		return write(socket, boost::asio::buffer(data), err);
-	}
-
-	size_t lvTlsSocketBase::Read(std::vector<unsigned char> & data, boost::system::error_code & err)
-	{
-		return read(socket, boost::asio::buffer(data), err);
-	}
-
-	size_t lvTlsSocketBase::ReadUntil(const std::string & term, boost::system::error_code & err)
-	{
-		return read_until(socket, inputStreamBuffer, term, err);
+		int err = socketErr;
+		return err;
 	}
 }
