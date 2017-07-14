@@ -1,7 +1,10 @@
 // testApp.cpp : Defines the entry point for the console application.
 //
 
-
+#include <lvTlsCallbackBase.h>
+#include <lvTlsEngine.h>
+#include <lvTlsSocket.h>
+#include <lvTlsConnectionCreator.h>
 #include <stdio.h>
 #include <algorithm>
 #include <memory>
@@ -19,161 +22,118 @@
 #include <boost/lockfree/queue.hpp>
 #include <boost/lockfree/spsc_queue.hpp>
 #include <chrono>
-#include <lvAsyncTls.hpp>
+
 
 using namespace boost::asio;
 using namespace lvasynctls;
 
-class testCB : public lvasynctls::lvTlsDataReadCallback {
+class testCB : public lvasynctls::lvTlsCallback {
 public:
 	std::string pval;
 	boost::lockfree::spsc_queue<std::string> * queue;
 	
-	testCB(std::string printer, boost::lockfree::spsc_queue<std::string> * q);
-	void execute();
-	virtual void setErrorCondition(const boost::system::error_code& error) override;
+	testCB(std::string printer, boost::lockfree::spsc_queue<std::string> * q) :pval(printer), queue{ q }
+	{
+		return;
+	}
+
+	void execute() {
+		queue->push(pval);
+	}
+
+	void printError() {
+		if (ec) {
+			std::cout << "error occurred: " << ec << "\n" << "error message: " << emsg << "\n";
+		}
+		else {
+			std::cout << "no error but callback called anyway\n";
+		}
+	}
+
+	virtual void setErrorCondition(int code, std::string message) override {
+		ec = code;
+		emsg = message;
+		printError();
+	}
+
+private:
+	std::string emsg;
+	int ec;
 };
-
-
-void testCB::execute()
-{
-	queue->push(pval);
-	if (mem) {
-		std::string pd{ mem->begin(), mem->end() };
-		queue->push(pd);
-	}
-	else {
-		queue->push("");
-	}
-}
-
-testCB::testCB(std::string printer, boost::lockfree::spsc_queue<std::string> * q) :pval(printer), queue{ q }
-{
-	return;
-}
-
-void testCB::setErrorCondition(const boost::system::error_code & error)
-{
-	if (mem) {
-		delete mem;
-		mem = nullptr;
-	}
-	auto em = error.message();
-	mem = new std::vector<uint8_t>(em.length() + 1);
-	std::copy(em.begin(), em.end(), std::back_inserter(*mem));
-}
-
-
-class testConnCB : public lvasynctls::lvTlsNewConnectionCallback {
-public:
-	std::string pval;
-	boost::lockfree::spsc_queue<lvTlsSocketBase*> * queue;
-
-	testConnCB(std::string printer, boost::lockfree::spsc_queue<lvTlsSocketBase*> * q);
-	void execute();
-	virtual void setErrorCondition(const boost::system::error_code& error) override;
-};
-
-testConnCB::testConnCB(std::string printer, boost::lockfree::spsc_queue<lvTlsSocketBase*> * q) :pval(printer), queue{ q }
-{
-	return;
-}
-
-void testConnCB::execute()
-{
-	std::cout << pval << "\n";
-	queue->push(s);
-}
-
-void testConnCB::setErrorCondition(const boost::system::error_code & error)
-{
-	if (error) {
-		std::cout << "error occurred: " << error.value() << "\n" << "error message: " << error.message() << "\n";
-	}
-}
 
 
 int main(int argc, char* argv[])
 {
 	std::cout << "hello\n";
-	auto engine = new lvasynctls::lvAsyncEngine();
+	std::shared_ptr<lvAsyncEngine> engine { new lvasynctls::lvAsyncEngine() };
 	std::cout << "new IO engine\n";
-	auto client = new lvasynctls::lvTlsClientConnector(engine);
+	std::shared_ptr<lvTlsClientConnector> client { new lvasynctls::lvTlsClientConnector(engine, 2) };
+	engine->registerConnector(client);
 	std::cout << "new client\n";	
 
 	auto hostName ="www.google.com";
 	auto port = "443";
-	auto cq = new boost::lockfree::spsc_queue<lvTlsSocketBase*>(5);
-	client->resolveAndConnect(hostName, port, new testConnCB("connected", cq));
+	auto q = new boost::lockfree::spsc_queue<std::string>(50);
+
+	std::string s;
+
+	client->resolveAndConnect(hostName, port, 5000000, new testCB("connected", q));
 	
-	lvTlsSocketBase* conn;
-	while (!(cq->pop(conn))) {
+	while (!(q->pop(s))) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
 
-	if (conn) {
-		auto q = new boost::lockfree::spsc_queue<std::string>(50);
-		testCB * cb;
-		std::string s;
+	std::cout << s;
+
+	auto conn = client->getNextConnection();
+
+	if (conn.get()) {
 
 		std::string req = "GET / HTTP/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n\0";
-		auto reqdata = new std::vector<unsigned char>(req.begin(), req.end());
-		cb = new testCB("sending", q);
-		conn->startWrite(reqdata, cb);
+		auto vdata = new std::vector<unsigned char>{ req.begin(), req.end() };
+		std::cout << "starting write\n";
+		conn->startWrite(vdata, new testCB("sent", q));
 
 		while (!(q->pop(s))) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		}
 		std::cout << s << "\n";
-		while (!(q->pop(s))) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		}
-		std::cout << s << "\n";
 
 
-
-		cb = new testCB("read done", q);
-		conn->startDirectRead(2000, cb);
+		conn->startStreamReadUntilTermString("\r\n\r\n", 100000, new testCB("read done", q));
 
 		while (!(q->pop(s))) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		}
 		std::cout << s << "\n";
-		while (!(q->pop(s))) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		}
-		std::cout << s << "\n";
-		try {
-			delete conn;
-		}
-		catch (...) {
 
-		}
+		auto bytesRead = conn->getInputStreamSize();
+		
+		std::cout << "bytes available: "<< bytesRead << "\n";
+
+		auto readBuf = new char[bytesRead + 1];
+
+		auto actualSize = conn->inputStreamReadN(readBuf, bytesRead);
+		std::cout << "bytes read: " << actualSize << "\n";
+
+		readBuf[actualSize] = 0;
+
+		std::cout << "data:\n" << readBuf << "\nfin\n";
+
+		delete[] readBuf;
+		conn->shutdown();
+		conn.reset();
 	}
 	else {
 		std::cout << "conn failed\n";
 	}
 	
-	
-	try {
-		delete client;
-	}
-	catch (const std::exception&)
-	{
-		std::cout << "exception during shutdown \n";
-	}
+	client->shutdown();
+	client.reset();
 	std::cout << "dispose client\n";
 
-	
-	engine->softShutdown();
-
-	try {
-		delete engine;
-	}
-	catch (const std::exception&)
-	{
-		std::cout << "exception during shutdown \n";
-	}
+	engine->shutdown();
+	engine.reset();
 	std::cout << "dispose eng\n";
 
 

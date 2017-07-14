@@ -1,6 +1,11 @@
 // testApp.cpp : Defines the entry point for the console application.
 //
 
+#include <lvTlsCallbackBase.h>
+#include <lvTlsEngine.h>
+#include <lvTlsSocket.h>
+#include <lvTlsConnectionCreator.h>
+
 
 #include <stdio.h>
 #include <algorithm>
@@ -23,7 +28,7 @@
 #include <boost/lockfree/spsc_queue.hpp>
 #include <boost/asio/ssl/context_base.hpp>
 #include <chrono>
-#include <lvAsyncTls.hpp>
+
 
 
 
@@ -31,218 +36,182 @@
 using namespace boost::asio;
 using namespace lvasynctls;
 
-class testCB : public lvasynctls::lvTlsDataReadCallback {
+class testCB : public lvasynctls::lvTlsCallback {
 public:
 	std::string pval;
 	boost::lockfree::spsc_queue<std::string> * queue;
+	boost::lockfree::spsc_queue<int> * errQ;
 
-	testCB(std::string printer, boost::lockfree::spsc_queue<std::string> * q) :pval(printer), queue{ q }
+	testCB(std::string printer, boost::lockfree::spsc_queue<std::string> * q = nullptr, boost::lockfree::spsc_queue<int> *eq = nullptr) :
+		pval(printer), queue{ q }, errQ{ eq }, ec{ 0 }, emsg {""}
 	{
 		return;
 	}
+
 	void execute() {
-		queue->push(pval);
-		if (mem) {
-			std::string pd{ mem->begin(), mem->end() };
-			queue->push(pd);
+		if (queue) {
+			queue->push(pval);
+		}
+		if (ec && errQ) {
+			errQ->push(ec);
+		}
+	}
+
+	void printError() {
+		if (ec) {
+			std::cout << "error occurred: " << ec << "\n" << "error message: " << emsg << "\n";
 		}
 		else {
-			queue->push("");
+			std::cout << "no error but callback called anyway\n";
 		}
 	}
-	virtual void setErrorCondition(const boost::system::error_code& error) override {
-		if (mem) {
-			delete mem;
-			mem = nullptr;
-		}
-		auto em = error.message();
-		mem = new std::vector<uint8_t>(em.length() + 1);
-		std::copy(em.begin(), em.end(), std::back_inserter(*mem));
-	}
-};
 
-class testCompleteCB : public lvasynctls::lvTlsCompletionCallback {
-public:
-	boost::lockfree::spsc_queue<size_t> * queue;
-	std::string pval;
-
-	testCompleteCB(boost::lockfree::spsc_queue<size_t> * q, std::string msg) : queue{ q }, pval{ msg } {
-		return;
-	}
-	~testCompleteCB() {
-		return;
+	virtual void setErrorCondition(int code, std::string message) override {
+		ec = code;
+		emsg = message + std::string(" (")
+			+ boost::lexical_cast<std::string>(ERR_GET_LIB(code)) + ","
+			+ boost::lexical_cast<std::string>(ERR_GET_FUNC(code)) + ","
+			+ boost::lexical_cast<std::string>(ERR_GET_REASON(code)) + ") "
+			;
+		printError();
 	}
 
-	void execute() {
-		std::cout << pval << "\n";
-		queue->push(dataLength);
-		return;
-	}
-
-	virtual void setErrorCondition(const boost::system::error_code& error) override {
-		std::cout << "error condition" << error.value() << "\n";
-	}
-
-};
-
-class testConnCB : public lvasynctls::lvTlsNewConnectionCallback {
-public:
-	std::string pval;
-	boost::lockfree::spsc_queue<lvTlsSocketBase*> * queue;
-
-	testConnCB(std::string printer, boost::lockfree::spsc_queue<lvTlsSocketBase*> * q) :pval(printer), queue{ q }
-	{
-		return;
-	}
-	void execute() {
-		std::cout << pval << "\n";
-		queue->push(s);
-	}
-	virtual void setErrorCondition(const boost::system::error_code& error) override {
-		if (error) {
-			std::string err = error.message();
-			if (error.category() == boost::asio::error::get_ssl_category()) {
-				err = std::string(" (")
-					+ boost::lexical_cast<std::string>(ERR_GET_LIB(error.value())) + ","
-					+ boost::lexical_cast<std::string>(ERR_GET_FUNC(error.value())) + ","
-					+ boost::lexical_cast<std::string>(ERR_GET_REASON(error.value())) + ") "
-					;
-				//ERR_PACK /* crypto/err/err.h */
-				char buf[128];
-				::ERR_error_string_n(error.value(), buf, sizeof(buf));
-				err += buf;
-			}
-
-			std::cout << "error occurred: " << error.value() << "\n" << "error message: " << err << "\n";
-		}
-	}
+private:
+	std::string emsg;
+	int ec;
 };
 
 
 int main(int argc, char* argv[])
 {
-	OpenSSL_add_all_algorithms();
-	OpenSSL_add_all_ciphers();
-	OpenSSL_add_all_digests();
-	PKCS5_PBE_add();
-
-	std::cout << "hello\n";
-	auto engine = new lvasynctls::lvAsyncEngine();
-	std::cout << "new IO engine\n";
+	auto q = new boost::lockfree::spsc_queue<std::string>(500);
+	auto eq = new boost::lockfree::spsc_queue<int>(500);
+	boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::tcp::v4(), 5555);
+	std::string s;
 
 
-	auto sAcceptor = new lvasynctls::lvTlsServerAcceptor(engine, 5555);
-	std::cout << "new acceptor\n";
+	std::shared_ptr<lvAsyncEngine> engine { new lvasynctls::lvAsyncEngine(2) };
+	
+	std::shared_ptr<lvTlsServerAcceptor> sAcceptor{ new lvasynctls::lvTlsServerAcceptor(engine, endpoint, 2) };
+	engine->registerConnector(sAcceptor);
+	std::cout << "new acceptor\n";	
 
 	sAcceptor->ctx.set_options(
 		boost::asio::ssl::context::default_workarounds
 		| boost::asio::ssl::context::no_sslv2
 		| boost::asio::ssl::context::single_dh_use);
-	lvasynctls::lvTlsConnectionCreator * cc = (lvasynctls::lvTlsConnectionCreator *) sAcceptor;
-	cc->enablePasswordCallback("test");
+	sAcceptor->enablePasswordCallback("test");
 	sAcceptor->ctx.use_certificate_chain_file("server.pem");
-
-
-
-	//std::ifstream t("server.pem");
-	//std::string str;
-
-	//t.seekg(0, std::ios::end);
-	//str.reserve(t.tellg());
-	//t.seekg(0, std::ios::beg);
-
-	//str.assign((std::istreambuf_iterator<char>(t)),	std::istreambuf_iterator<char>());
-	//t.close();
-	//sAcceptor->ctx.use_private_key(buffer(str), boost::asio::ssl::context::pem);
 	sAcceptor->ctx.use_private_key_file("server.pem", boost::asio::ssl::context::pem);
 	sAcceptor->ctx.use_tmp_dh_file("dh2048.pem");
 	std::cout << "config ssl context\n";
+	
+	sAcceptor->startAccept(100000, new testCB("accepted\n", q));
+	sAcceptor->startAccept(100000, new testCB("accepted\n", q));
+	sAcceptor->startAccept(100000, new testCB("accepted\n", q));
+	sAcceptor->startAccept(100000, new testCB("accepted\n", q));
 
-
-	auto cq = new boost::lockfree::spsc_queue<lvTlsSocketBase*>(5);
-
-	sAcceptor->startAccept(new testConnCB("connected", cq));
-
-	lvTlsSocketBase* conn;
-	while (!(cq->pop(conn))) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	}
-
-	if (conn) {
-		auto q = new boost::lockfree::spsc_queue<std::string>(50);
-		auto lq = new boost::lockfree::spsc_queue<size_t>(50);
-		std::string s;
-		size_t readlen;
-		
-		conn->startStreamReadUntilTermChar('\n', 10240, new testCompleteCB(lq, "read done"));
-
-		while (!(lq->pop(readlen))) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		}
-		std::cout << readlen << " read from ssl\n";
-
-		char * buffer = new char[readlen];
-
-		auto ret = conn->inputStreamReadSome(buffer, readlen);
-		std::cout << ret << " read from internal stream\n";
-
-		//conn->startDirectRead(10, new testCB("read", q));
-
-		//for (size_t i = 0; i < 2; i++)
-		//{
-		//	while (!(q->pop(s))) {
-		//		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		//	}
-		//	std::cout << s << "\n";
-		//}
-		std::cout << "Buffer:\n";
-		for (int i = 0; i < ret; i++) {
-			std::cout << buffer[i];
-		}
-		std::cout << "\nEoBuffer\n";
-
-		//auto tx = new std::vector<uint8_t>(s.begin(), s.end());
-		auto tx = new std::vector<uint8_t>(buffer, buffer + ret);
-		conn->startWrite(tx, new testCB("echo", q));
-
-		for (size_t i = 0; i < 2; i++)
+	auto t = new boost::thread{ 
+	[&engine, &sAcceptor]() mutable 
 		{
-			while (!(q->pop(s))) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-			}
-			std::cout << s << "\n";
+		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+		sAcceptor->shutdown();
+		sAcceptor.reset();
+		engine->shutdown();
+		engine.reset();
 		}
+	};
 
-		delete[] buffer;
-		delete conn;
-	}
-	else {
-		std::cout << "conn failed\n";
-	}
+	t->join();
+
+	
+
+	//while (!(q->pop(s))) {
+	//	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	//}
+
+	//std::cout << s;
+
+	//auto conn = sAcceptor->getNextConnection();
+
+	//if (conn) {		
+	//	int err = 0;
+
+	//	//while (true) {
+	//	//	for (size_t i = 0; i < 26; i++)
+	//	//	{
+	//	//		auto vec = new std::vector<unsigned char>(100000, 97 + i);
+	//	//		auto cb = new testCB("responded\n", q, eq);
+	//	//		auto ret = conn->startWrite(vec, cb);
+	//	//		if (ret < 1) {
+	//	//			//didnt enqueue
+	//	//			delete vec;
+	//	//			delete cb;
+	//	//			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	//	//		}
+	//	//		if (eq->pop(err)) {
+	//	//			std::cout << "err: " << err << "\n";
+	//	//			break;
+	//	//		}
+	//	//	}
+
+	//	//	if(err){
+	//	//		std::cout << "err: " << err << "\n";
+	//	//		break;
+	//	//	}
+	//	//}
+
+	//	
+
+	//	std::cout << "starting read\n";
+	//	conn->startStreamReadUntilTermString("\n", 10240, new testCB("read done", q));
+
+	//	while (!(q->pop(s))) {
+	//		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	//	}
+	//	std::cout << s << "\n";
+
+	//	auto bytesRead = conn->getInputStreamSize();
+
+	//	std::cout << "bytes available: " << bytesRead << "\n";
+
+	//	auto readBuf = new char[bytesRead + 1];
+
+	//	auto actualSize = conn->inputStreamReadN(readBuf, bytesRead);
+	//	std::cout << "bytes read: " << actualSize << "\n";
+
+	//	readBuf[actualSize] = 0;
+	//	std::cout << "data:\n" << readBuf << "\nfin\n";
+
+	//	auto outVec = new std::vector<unsigned char>{ readBuf, readBuf + actualSize };
+
+	//	
+	//	conn->startWrite(outVec, new testCB("responded", q));
 
 
-	try {
-		delete sAcceptor;
-	}
-	catch (const std::exception&)
-	{
-		std::cout << "exception during shutdown \n";
-	}
-	std::cout << "dispose acceptor\n";
+	//	while (!(q->pop(s))) {
+	//		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	//	}
+	//	std::cout << s << "\n";
 
+	//	delete[] readBuf;
 
-	engine->softShutdown();
+	//	conn->shutdown();
+	//	conn.reset();
+	//}
+	//else {
+	//	std::cout << "conn failed\n";
+	//}
 
-	try {
-		delete engine;
-	}
-	catch (const std::exception&)
-	{
-		std::cout << "exception during shutdown \n";
-	}
-	std::cout << "dispose eng\n";
+	//sAcceptor->shutdown();
+	//sAcceptor.reset();
+	//std::cout << "dispose acceptor\n";
 
+	//engine->shutdown();
+	//engine.reset();
+	//std::cout << "dispose eng\n";
 
+	delete q;
 	int blah;
 	std::cin >> blah;
 

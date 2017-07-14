@@ -2,9 +2,10 @@
 
 #include "lvTlsSocket.h"
 #include "lvTlsConnectionCreator.h"
-#include <unordered_set>
+#include <unordered_map>
 #include <mutex>
 #include <memory>
+#include <atomic>
 #include <boost/asio.hpp>
 #include <boost/thread.hpp>
 #include <boost/shared_ptr.hpp>
@@ -14,17 +15,18 @@ namespace lvasynctls {
 	class lvTlsConnectionCreator;
 	class lvTlsSocketBase;
 
-	class lvAsyncEngine {
+	class lvAsyncEngine  {
 	public:
-		lvAsyncEngine();
+		explicit lvAsyncEngine();
 		explicit lvAsyncEngine(std::size_t threadCount);
+		void shutdown();
 		~lvAsyncEngine();
-		boost::shared_ptr<boost::asio::io_service> getIOService();
+		std::shared_ptr<boost::asio::io_service> getIOService();
 
-		void registerSocket(lvTlsSocketBase* tlsSock);
+		void registerSocket(std::shared_ptr<lvTlsSocketBase> tlsSock);
 		std::size_t unregisterSocket(lvTlsSocketBase* tlsSock);
 
-		void registerConnector(lvTlsConnectionCreator* connector);
+		void registerConnector(std::shared_ptr<lvTlsConnectionCreator> connector);
 		std::size_t unregisterConnector(lvTlsConnectionCreator* connector);
 
 	private:
@@ -32,14 +34,15 @@ namespace lvasynctls {
 		const lvAsyncEngine& operator=(const lvAsyncEngine&) = delete;
 		void initializeThreads(std::size_t threadCount);
 
-		void ioRunThread(boost::shared_ptr<boost::asio::io_service> ioengine);
+		void ioRunThread(std::shared_ptr<boost::asio::io_service> ioengine);
 
-		boost::shared_ptr<boost::asio::io_service> ioEngine;
+		std::shared_ptr<boost::asio::io_service> ioEngine;
 		boost::asio::io_service::work* engineWork;
 		boost::thread_group threadSet;
-		std::unordered_set<lvTlsSocketBase*> socketSet;
-		std::unordered_set<lvTlsConnectionCreator*> connectorSet;
+		std::unordered_map<lvTlsSocketBase*, std::shared_ptr<lvTlsSocketBase>> socketSet;
+		std::unordered_map<lvTlsConnectionCreator*, std::shared_ptr<lvTlsConnectionCreator>> connectorSet;
 		std::mutex lock;
+		std::atomic_bool dead;
 	};
 }
 

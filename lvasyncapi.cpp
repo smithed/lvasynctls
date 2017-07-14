@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_set>
 #include <boost/asio.hpp>
+#include <boost/asio/ip/tcp.hpp>
 
 
 
@@ -31,7 +32,7 @@ std::vector<uint8_t> LStrToVector(LStrHandle s) {
 	return v;
 }
 
-static std::unordered_set<lvasynctls::lvAsyncEngine**> engineSet{};
+static std::unordered_set<std::shared_ptr<lvasynctls::lvAsyncEngine>*> engineSet{};
 static std::mutex engineSetLock{};
 
 #ifdef __cplusplus
@@ -48,6 +49,11 @@ extern "C" {
 	//todo: error
 	lvExport MgErr lvTlsIOengine_unreserve(InstanceDataPtr * instance)
 	{
+		try {
+			clearInstanceEngineSet();
+		}
+		catch (...) {
+		}
 		return mgNoErr;
 	}
 
@@ -55,7 +61,6 @@ extern "C" {
 	{
 		try {
 			clearInstanceEngineSet();
-			return mgNoErr;
 		}
 		catch (...) {
 		}
@@ -64,7 +69,7 @@ extern "C" {
 
 	void clearInstanceEngineSet() 
 	{
-		std::unordered_set<lvasynctls::lvAsyncEngine**> setCpy;
+		std::unordered_set<std::shared_ptr<lvasynctls::lvAsyncEngine>*> setCpy{};
 		try {
 			std::lock_guard<std::mutex> lockg(engineSetLock);
 			setCpy = engineSet;
@@ -77,10 +82,10 @@ extern "C" {
 				for (auto itr = setCpy.begin(); itr != setCpy.end(); ++itr) {
 					try {
 						auto engPtr = *itr;
-						delete (*engPtr);
-						*engPtr = nullptr;
-						//don't delete engPtr here, new pattern is ONLY delete the ptr if the appropriate shutdown is called.
-						//out of band failures will leave the handle intact but pointing to null
+						if (engPtr) {
+							(*engPtr)->shutdown();
+							engPtr->reset();
+						}
 					}
 					catch (...) {
 					}
@@ -92,13 +97,11 @@ extern "C" {
 		}
 	}
 	
-	void lvTlsIOengine_recordInstance(lvasynctls::lvAsyncEngine ** engine)
+	void lvTlsIOengine_recordInstance(std::shared_ptr<lvasynctls::lvAsyncEngine>* engine)
 	{
 		try {
 			std::lock_guard<std::mutex> lockg(engineSetLock);
-			if (engine) {
-				engineSet.insert(engine);
-			}
+			engineSet.insert(engine);
 		}
 		catch (...)
 		{
@@ -106,13 +109,11 @@ extern "C" {
 		}
 	}
 
-	void lvTlsIOengine_removeInstance(lvasynctls::lvAsyncEngine ** engine)
+	void lvTlsIOengine_removeInstance(std::shared_ptr<lvasynctls::lvAsyncEngine>* engine)
 	{
 		try {
 			std::lock_guard<std::mutex> lockg(engineSetLock);
-			if (engine) {
-				engineSet.erase(engine);
-			}
+			engineSet.erase(engine);
 		}
 		catch (...)
 		{
@@ -122,48 +123,39 @@ extern "C" {
 
 
 	//engine
-	lvExport lvasynctls::lvAsyncEngine ** lvtlsCreateIOEngine()
+	lvExport std::shared_ptr<lvasynctls::lvAsyncEngine>* lvtlsCreateIOEngine()
 	{
-		auto engine = new (lvasynctls::lvAsyncEngine *);
 		try {
-			(*engine) = new lvasynctls::lvAsyncEngine();
+			auto engine = new std::shared_ptr<lvasynctls::lvAsyncEngine>{ new lvasynctls::lvAsyncEngine() };
 			lvTlsIOengine_recordInstance(engine);
 			return engine;
 		}
 		catch (...) {
-			delete (*engine);
-			delete engine;
-
 			return nullptr;
 		}	
 	}
 
 	//engine
-	lvExport lvasynctls::lvAsyncEngine ** lvtlsCreateIOEngineNThreads(std::size_t threadCount)
+	lvExport std::shared_ptr<lvasynctls::lvAsyncEngine>* lvtlsCreateIOEngineNThreads(std::size_t threadCount)
 	{
-		auto engine = new (lvasynctls::lvAsyncEngine *);
 		try {
-			(*engine) = new lvasynctls::lvAsyncEngine(threadCount);
+			auto engine = new std::shared_ptr<lvasynctls::lvAsyncEngine>{ new lvasynctls::lvAsyncEngine(threadCount) };
 			lvTlsIOengine_recordInstance(engine);
 			return engine;
 		}
 		catch (...) {
-			delete (*engine);
-			delete engine;
-
 			return nullptr;
 		}
 	}
 
-	lvExport MgErr lvtlsDisposeIOEngine(lvasynctls::lvAsyncEngine ** engine)
+	lvExport MgErr lvtlsDisposeIOEngine(std::shared_ptr<lvasynctls::lvAsyncEngine>* engine)
 	{
 		try {
-			if (engine) {
+			if (engine && *engine) {
 				lvTlsIOengine_removeInstance(engine);
-
-				delete (*engine);
-				*engine = nullptr;
-
+				
+				(*engine)->shutdown();
+				engine->reset();
 				delete engine;
 				engine = nullptr;
 
@@ -179,30 +171,21 @@ extern "C" {
 	}
 
 	//client
-	lvExport lvasynctls::lvTlsClientConnector ** lvtlsCreateClientConnector(lvasynctls::lvAsyncEngine ** engine)
+	lvExport std::shared_ptr<lvasynctls::lvTlsClientConnector>* lvtlsCreateClientConnector(std::shared_ptr<lvasynctls::lvAsyncEngine>* engine)
 	{
 		if (engine && *engine) {
-			auto c = new (lvasynctls::lvTlsClientConnector *);
-			try {
-				(*c) = new lvasynctls::lvTlsClientConnector(*engine);
-				return c;
-			}
-			catch (...) {
-				delete (*c);
-				*c = nullptr;
-				delete c;
-				c = nullptr;
-				
-				return nullptr;
-			}
+			auto esp = *engine;
+			auto c = new std::shared_ptr<lvasynctls::lvTlsClientConnector>{ new lvasynctls::lvTlsClientConnector{esp, 100} };
+			esp->registerConnector(*c);
+			return c;
 		}
 		else {
 			return nullptr;
 		}
 	}
 
-	lvExport MgErr lvtlsBeginClientConnect(lvasynctls::lvTlsClientConnector ** client,
-		LStrHandle host, LStrHandle port, size_t bufferMaxSize,
+	lvExport MgErr lvtlsBeginClientConnect(std::shared_ptr<lvasynctls::lvTlsClientConnector>* client,
+		LStrHandle host, LStrHandle port, size_t bufferMaxSize, size_t outputQueueSize,
 		LVUserEventRef * e, uint32_t requestID)
 	{
 		if (client && *client && LHStrPtr(host) && LHStrPtr(port) && LHStrBuf(host) && LHStrBuf(port)) {
@@ -211,7 +194,7 @@ extern "C" {
 				if (e && *e != kNotAMagicCookie) {
 					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
-				(*client)->resolveAndConnect(LstrToStdStr(host), LstrToStdStr(port), bufferMaxSize, cb);
+				(*client)->resolveAndConnect(LstrToStdStr(host), LstrToStdStr(port), bufferMaxSize, outputQueueSize, cb);
 				return mgNoErr;
 			}
 			catch (...) {
@@ -221,33 +204,20 @@ extern "C" {
 				return 42;
 			}
 		}
-		else if (client && *client) {
-			return axEventQueueNotCreated;
-		}
 		else {
 			return oleNullRefnumPassed;
 		}
 	}
 
 	//server
-	lvExport lvasynctls::lvTlsServerAcceptor ** lvtlsCreateServerAcceptor(lvasynctls::lvAsyncEngine ** engine, uint16_t port)
+	lvExport std::shared_ptr<lvasynctls::lvTlsServerAcceptor>* lvtlsCreateServerAcceptor(std::shared_ptr<lvasynctls::lvAsyncEngine>* engine, uint16_t port, uint8_t v6)
 	{
 		if (engine && *engine) {
-			auto a = new (lvasynctls::lvTlsServerAcceptor *);
-			try {
-				(*a) = new lvasynctls::lvTlsServerAcceptor(*engine, port);
-				return a;
-			}
-			catch (...) {
-				if (a) {
-					delete (*a);
-					*a = nullptr;
-
-					delete a;
-					a = nullptr;
-				}
-				return nullptr;
-			}
+			boost::asio::ip::tcp::endpoint endpoint(((v6>0) ? boost::asio::ip::tcp::v6() : boost::asio::ip::tcp::v4()), port);
+			auto esp = *engine;
+			auto a = new std::shared_ptr<lvasynctls::lvTlsServerAcceptor>{ new lvasynctls::lvTlsServerAcceptor{ esp, endpoint} };
+			esp->registerConnector(*a);
+			return a;
 		}
 		else {
 			return nullptr;
@@ -255,7 +225,9 @@ extern "C" {
 	}
 
 
-	lvExport MgErr lvtlsBeginServerAccept(lvasynctls::lvTlsServerAcceptor ** acceptor, size_t bufferMaxSize, LVUserEventRef * e, uint32_t requestID)
+	lvExport MgErr lvtlsBeginServerAccept(
+		std::shared_ptr<lvasynctls::lvTlsServerAcceptor>* acceptor, size_t bufferMaxSize, size_t outputQueueSize,
+		LVUserEventRef * e, uint32_t requestID)
 	{
 		if (acceptor && *acceptor) {
 			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
@@ -263,7 +235,7 @@ extern "C" {
 				if (e && *e != kNotAMagicCookie) {
 					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
-				(*acceptor)->startAccept(bufferMaxSize, cb);
+				(*acceptor)->startAccept(bufferMaxSize, outputQueueSize, cb);
 				return mgNoErr;
 			}
 			catch (...) {
@@ -274,23 +246,16 @@ extern "C" {
 			}
 		}
 		else {
-			if (acceptor && *acceptor) {
-				return axEventQueueNotCreated;
-			}
-			else {
-				return oleNullRefnumPassed;
-			}
+			return oleNullRefnumPassed;
 		}
 	}
 
-	lvExport MgErr lvtlsDisposeConnectionCreator(lvasynctls::lvTlsConnectionCreator ** creator)
+	lvExport MgErr lvtlsDisposeConnectionCreator(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator)
 	{
 		try {
-			if (creator) {
-				delete (*creator);
-				*creator = nullptr;
-
-				delete creator;
+			if (creator && *creator) {
+				(*creator)->shutdown();
+				creator->reset();
 				creator = nullptr;
 
 				return mgNoErr;
@@ -304,12 +269,14 @@ extern "C" {
 		}
 	}
 
-	lvExport lvasynctls::lvTlsSocketBase ** lvtlsPopAvailableConnection(lvasynctls::lvTlsConnectionCreator ** creator)
+	lvExport std::shared_ptr<lvasynctls::lvTlsSocketBase>* lvtlsPopAvailableConnection(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator)
 	{
 		if (creator && *creator) {
-			auto s = (*creator)->getNextConnection();
-			if (s) {
-				return new (lvasynctls::lvTlsSocketBase *)(s);
+			auto snext = (*creator)->getNextConnection();
+			if (snext.get()) {
+				auto ssp = new std::shared_ptr<lvasynctls::lvTlsSocketBase>;
+				ssp->swap(snext);
+				return ssp;
 			}
 			else {
 				return nullptr;
@@ -319,7 +286,7 @@ extern "C" {
 	}
 
 	//ssl context
-	lvExport MgErr lvtlsSetOptions(lvasynctls::lvTlsConnectionCreator ** creator, long options)
+	lvExport MgErr lvtlsSetOptions(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, long options)
 	{
 		if (creator && *creator) {
 			try {
@@ -336,7 +303,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetVerifymode(lvasynctls::lvTlsConnectionCreator** creator, int v)
+	lvExport MgErr lvtlsSetVerifymode(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, int v)
 	{
 		if (creator && *creator) {
 			try {
@@ -353,7 +320,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetRfc2818Verification(lvasynctls::lvTlsConnectionCreator** creator, const char* host)
+	lvExport MgErr lvtlsSetRfc2818Verification(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char* host)
 	{
 		if (creator && *creator) {
 			try {
@@ -371,7 +338,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsLoadVerifyFile(lvasynctls::lvTlsConnectionCreator** creator, const char* filename)
+	lvExport MgErr lvtlsLoadVerifyFile(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char* filename)
 	{
 		if (creator && *creator) {
 			try {
@@ -389,7 +356,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsAddCertificateauthority(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle ca)
+	lvExport MgErr lvtlsAddCertificateauthority(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, LStrHandle ca)
 	{
 		if (creator && *creator) {
 			try {
@@ -406,7 +373,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetDefaultVerifyPaths(lvasynctls::lvTlsConnectionCreator** creator)
+	lvExport MgErr lvtlsSetDefaultVerifyPaths(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator)
 	{
 		if (creator && *creator) {
 			try {
@@ -423,7 +390,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsAddVerifyPath(lvasynctls::lvTlsConnectionCreator** creator, const char* path)
+	lvExport MgErr lvtlsAddVerifyPath(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char* path)
 	{
 		if (creator && *creator) {
 			try {
@@ -441,7 +408,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseCertificate(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle certificate, int format)
+	lvExport MgErr lvtlsUseCertificate(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, LStrHandle certificate, int format)
 	{
 		if (creator && *creator) {
 			try {
@@ -458,7 +425,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseCertificateFile(lvasynctls::lvTlsConnectionCreator** creator, const char* filename, int format)
+	lvExport MgErr lvtlsUseCertificateFile(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char* filename, int format)
 	{
 		if (creator && *creator) {
 			try {
@@ -476,7 +443,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseCertificateChain(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle chain)
+	lvExport MgErr lvtlsUseCertificateChain(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, LStrHandle chain)
 	{
 		if (creator && *creator) {
 			try {
@@ -493,7 +460,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseCertificateChainFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename)
+	lvExport MgErr lvtlsUseCertificateChainFile(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char*  filename)
 	{
 		if (creator && *creator) {
 			try {
@@ -511,7 +478,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUsePrivateKey(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle privateKey, int format)
+	lvExport MgErr lvtlsUsePrivateKey(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, LStrHandle privateKey, int format)
 	{
 		if (creator && *creator) {
 			try {
@@ -528,7 +495,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUsePrivateKeyFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename, int format)
+	lvExport MgErr lvtlsUsePrivateKeyFile(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char*  filename, int format)
 	{
 		if (creator && *creator) {
 			try {
@@ -550,7 +517,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseRsaPrivateKey(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle privateKey, int format)
+	lvExport MgErr lvtlsUseRsaPrivateKey(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, LStrHandle privateKey, int format)
 	{
 		if (creator && *creator) {
 			try {
@@ -567,7 +534,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseRsaPrivateKeyFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename, int format)
+	lvExport MgErr lvtlsUseRsaPrivateKeyFile(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char*  filename, int format)
 	{
 		if (creator && *creator) {
 			try {
@@ -585,7 +552,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseTmpDh(lvasynctls::lvTlsConnectionCreator** creator, LStrHandle dh)
+	lvExport MgErr lvtlsUseTmpDh(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, LStrHandle dh)
 	{
 		if (creator && *creator) {
 			try {
@@ -602,7 +569,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsUseTmpDhFile(lvasynctls::lvTlsConnectionCreator** creator, const char*  filename)
+	lvExport MgErr lvtlsUseTmpDhFile(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char*  filename)
 	{
 		if (creator && *creator) {
 			try {
@@ -620,7 +587,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsSetFilePassword(lvasynctls::lvTlsConnectionCreator** creator, const char * pass)
+	lvExport MgErr lvtlsSetFilePassword(std::shared_ptr<lvasynctls::lvTlsConnectionCreator>* creator, const char * pass)
 	{
 		if (creator && *creator) {
 			try {
@@ -640,11 +607,12 @@ extern "C" {
 	
 
 	//socket stream
-	lvExport MgErr lvtlsCloseConnection(lvasynctls::lvTlsSocketBase** s)
+	lvExport MgErr lvtlsCloseConnection(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s)
 	{
-		if (s) {
-			delete (*s);
-			*s = nullptr;
+		if (s && *s) {
+			(*s)->shutdown();
+
+			s->reset();
 
 			delete s;
 			s = nullptr;
@@ -656,12 +624,12 @@ extern "C" {
 		return mgNoErr;
 	}
 
-	lvExport int64_t lvtlsBeginWrite(lvasynctls::lvTlsSocketBase ** s, LVUserEventRef * e, LStrHandle data, uint32_t requestID)
+	lvExport int64_t lvtlsBeginWrite(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s, LVUserEventRef * e, LStrHandle data, uint32_t requestID)
 	{
 		if (s && *s && LHStrPtr(data) && LHStrBuf(data) && (LHStrLen(data) > 0)) {
-			auto dataVec = new std::vector<unsigned char>(LHStrLen(data));
+			auto dataVec = new std::vector<unsigned char>(LHStrBuf(data), LHStrBuf(data) + LHStrLen(data));
 			//mem cpy
-			dataVec->assign(LHStrBuf(data), LHStrBuf(data) + LHStrLen(data));
+			//dataVec->assign(LHStrBuf(data), LHStrBuf(data) + LHStrLen(data));
 
 			lvasyncapi::LVCompletionNotificationCallback * cb = nullptr;
 			try {
@@ -669,21 +637,22 @@ extern "C" {
 					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
 				auto copied = (*s)->startWrite(dataVec, cb);
-				
+
+				if (copied < 1) {
+					delete dataVec;
+					delete cb;
+				}
+
 				return copied;
 			}
 			catch (...) {
 			}
 			//only reach this point on exception
-			try {
-				delete cb;
-				cb = nullptr;
 
-				return -2;
-			}
-			catch (...) {
-				return -3;
-			}
+			delete cb;
+			cb = nullptr;
+
+			return -2;
 
 		}
 		else {
@@ -691,7 +660,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsBeginStreamRead(lvasynctls::lvTlsSocketBase ** s, LVUserEventRef * e, size_t bytesToRead, uint32_t requestID)
+	lvExport MgErr lvtlsBeginStreamRead(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s, LVUserEventRef * e, size_t bytesToRead, uint32_t requestID)
 	{
 		if (s && *s) {
 			lvasyncapi::LVCompletionNotificationCallback* cb = nullptr;
@@ -699,70 +668,63 @@ extern "C" {
 				if (e && *e != kNotAMagicCookie) {
 					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
-				(*s)->startStreamRead(bytesToRead, cb);
-				return mgNoErr;
+				auto ret = (*s)->startStreamRead(bytesToRead, cb);
+				return ret;
 			}
 			catch (...) {
 				delete cb;
 				cb = nullptr;
 
-				return 42;
+				return -2;
 			}
 		}
 		else {
-			return mgArgErr;
+			return -1;
 		}
 	}
 
-	lvExport MgErr lvtlsBeginStreamReadUntilTerm(lvasynctls::lvTlsSocketBase ** s, LVUserEventRef * e, LStrHandle termination, size_t maxBytesToRead, uint32_t requestID)
+	lvExport MgErr lvtlsBeginStreamReadUntilTerm(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s, LVUserEventRef * e, LStrHandle termination, size_t maxBytesToRead, uint32_t requestID)
 	{
-		if (s && *s && termination && LHStrPtr(termination)) {
+		if (s && *s && termination && LHStrPtr(termination) && (LHStrLen(termination) > 0)) {
 			lvasyncapi::LVCompletionNotificationCallback* cb = nullptr;
 			size_t termLen = LHStrLen(termination);
-			if (termLen > 0) {
-				try {
-					if (e && *e != kNotAMagicCookie) {
-						cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
-					}
-
-					if (termLen == 1) {
-						//single character
-						char termChar = LHStrBuf(termination)[0];
-						(*s)->startStreamReadUntilTermChar(termChar, maxBytesToRead, cb);
-						return mgNoErr;
-					}
-					else if (termLen > 1) {
-						//multi-character
-						std::string termStr = LstrToStdStr(termination);
-						(*s)->startStreamReadUntilTermString(termStr, maxBytesToRead, cb);
-						return mgNoErr;
-					}
-					else {
-						//if we get to this point something bad happened
-						delete cb;
-						cb = nullptr;
-
-						return 42;
-					}					
+			try {
+				if (e && *e != kNotAMagicCookie) {
+					cb = new lvasyncapi::LVCompletionNotificationCallback(e, requestID);
 				}
-				catch (...) {
+				if (termLen == 1) {
+					//single character
+					char termChar = LHStrBuf(termination)[0];
+					auto ret = (*s)->startStreamReadUntilTermChar(termChar, maxBytesToRead, cb);
+					return ret;
+				}
+				else if (termLen > 1) {
+					//multi-character
+					std::string termStr = LstrToStdStr(termination);
+					auto ret = (*s)->startStreamReadUntilTermString(termStr, maxBytesToRead, cb);
+					return ret;
+				}
+				else {
+					//if we get to this point something bad happened
 					delete cb;
 					cb = nullptr;
 
-					return 42;
-				}
+					return -3;
+				}			
 			}
-			else {
-				//string length is 0
-				return mgArgErr;
+			catch (...) {
+				delete cb;
+				cb = nullptr;
+
+				return -2;
 			}
 		}
 		else {
-			return mgArgErr;
+			return -1;
 		}
 	}
 
-	lvExport size_t lvtlsGetInternalStreamSize(lvasynctls::lvTlsSocketBase ** s)
+	lvExport size_t lvtlsGetInternalStreamSize(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s)
 	{
 		if (s && *s) {
 			return (*s)->getInputStreamSize();
@@ -772,7 +734,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsInputStreamReadSome(lvasynctls::lvTlsSocketBase ** s, LStrHandle buffer, size_t maxLen)
+	lvExport MgErr lvtlsInputStreamReadSome(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s, LStrHandle buffer, size_t maxLen)
 	{
 		if (s && *s && buffer && maxLen > 0) {
 			if (LHStrLen(buffer) != maxLen) {
@@ -797,7 +759,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsInputStreamReadN(lvasynctls::lvTlsSocketBase ** s, LStrHandle buffer, size_t len)
+	lvExport MgErr lvtlsInputStreamReadN(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s, LStrHandle buffer, size_t len)
 	{
 		if (s && *s && buffer && len > 0) {
 			if (LHStrLen(buffer) != len) {
@@ -821,7 +783,7 @@ extern "C" {
 		}
 	}
 
-	lvExport MgErr lvtlsInputStreamReadLine(lvasynctls::lvTlsSocketBase ** s, LStrHandle buffer, size_t maxLen, char delimiter)
+	lvExport MgErr lvtlsInputStreamReadLine(std::shared_ptr<lvasynctls::lvTlsSocketBase>* s, LStrHandle buffer, size_t maxLen, char delimiter)
 	{
 		if (s && *s && buffer && maxLen > 0) {
 			if (LHStrLen(buffer) != maxLen) {

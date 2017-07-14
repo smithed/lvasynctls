@@ -1,6 +1,6 @@
 #include "lvTlsEngine.h"
 #include "lvTlsConnectionCreator.h"
-#include <unordered_set>
+#include <unordered_map>
 #include <mutex>
 #include <boost/asio.hpp>
 #include <boost/thread.hpp>
@@ -15,7 +15,8 @@ namespace lvasynctls {
 	//main engine
 	lvAsyncEngine::lvAsyncEngine() : socketSet(), connectorSet(),
 		ioEngine{ new boost::asio::io_service(std::thread::hardware_concurrency()) },
-		engineWork(new io_service::work(*ioEngine))
+		engineWork(new io_service::work(*ioEngine)),
+		dead{ false }
 	{
 		OpenSSL_add_all_algorithms();
 		OpenSSL_add_all_ciphers();
@@ -26,7 +27,8 @@ namespace lvasynctls {
 
 	lvAsyncEngine::lvAsyncEngine(std::size_t threadCount) : socketSet(), connectorSet(),
 		ioEngine{ new boost::asio::io_service(threadCount) },
-		engineWork(new io_service::work(*ioEngine))
+		engineWork(new io_service::work(*ioEngine)),
+		dead{ false }
 	{
 		OpenSSL_add_all_algorithms();
 		OpenSSL_add_all_ciphers();
@@ -35,61 +37,67 @@ namespace lvasynctls {
 		lvAsyncEngine::initializeThreads(threadCount);
 	}
 
+	void lvAsyncEngine::shutdown()
+	{
+		if (!dead) {
+			dead = true;
+
+
+			try {
+				std::unordered_map<lvTlsSocketBase*, std::shared_ptr<lvTlsSocketBase>> sockSnapshot{};
+				std::unordered_map<lvTlsConnectionCreator*, std::shared_ptr<lvTlsConnectionCreator>> connSnapshot{};
+				{
+					std::lock_guard<std::mutex> lg(lock);
+
+					socketSet.swap(sockSnapshot);
+					connectorSet.swap(connSnapshot);
+				}
+
+				if (connSnapshot.size() > 0) {
+					for (auto itr = connSnapshot.begin(); itr != connSnapshot.end(); ++itr) {
+						try {
+							auto connptr = itr->second;
+							connptr->shutdown();
+							connptr.reset();
+						}
+						catch (...) {
+						}
+					}
+					connSnapshot.clear();
+				}
+
+				if (sockSnapshot.size() > 0) {
+					for (auto itr = sockSnapshot.begin(); itr != sockSnapshot.end(); ++itr) {
+						try {
+							auto sockptr = itr->second;
+							sockptr->shutdown();
+							sockptr.reset();
+						}
+						catch (...) {
+						}
+					}
+					sockSnapshot.clear();
+				}
+
+			}
+			catch (...) {
+			}
+		}
+	}
+
 	lvAsyncEngine::~lvAsyncEngine()
 	{
-		try {
-			std::unordered_set<lvTlsSocketBase*> sockSnapshot;
-			std::unordered_set<lvTlsConnectionCreator*> connSnapshot;
-			{
-				std::lock_guard<std::mutex> lg(lock);
-				
-				sockSnapshot = socketSet;
-				connSnapshot = connectorSet;
-				socketSet.clear();
-				connectorSet.clear();
-			}
-
-			if (connSnapshot.size() > 0) {
-				for (auto itr = connSnapshot.begin(); itr != connSnapshot.end(); ++itr) {
-					try {
-						auto val = *itr;
-						if (val) {
-							delete val;
-							val = nullptr;
-						}
-					}
-					catch (...) {
-					}
-				}
-			}
-
-			if (sockSnapshot.size() > 0) {
-				for (auto itr = sockSnapshot.begin(); itr != sockSnapshot.end(); ++itr) {
-					try {
-						auto val = *itr;
-						if (val) {
-							delete val;
-							val = nullptr;
-						}
-					}
-					catch (...) {
-					}
-				}
-			}
-			
-		}
-		catch (...) {
-		}
-
-		//engine has to run to allow sockets to shutdown do we do that now.
+		shutdown();
+		//engine has to run to allow sockets to shutdown so now we kill engine runners
 		try {
 			delete engineWork;
 			engineWork = nullptr;
 
-			ioEngine->stop();
+			//ioEngine->stop();
 		}
 		catch (...) {
 		}
+
 		try {
 			threadSet.interrupt_all();
 			threadSet.join_all();
@@ -101,27 +109,29 @@ namespace lvasynctls {
 		ioEngine.reset();
 	}
 
-	boost::shared_ptr<boost::asio::io_service> lvAsyncEngine::getIOService()
+	std::shared_ptr<boost::asio::io_service> lvAsyncEngine::getIOService()
 	{
+		if (dead) {
+			return std::shared_ptr<boost::asio::io_service>{ nullptr };
+		}
 		return ioEngine;
 	}
 
-	void lvAsyncEngine::registerSocket(lvTlsSocketBase * tlsSock)
+	void lvAsyncEngine::registerSocket(std::shared_ptr<lvTlsSocketBase> tlsSock)
 	{
-		if (tlsSock) {
+		if (tlsSock && !dead) {
 			try {
 				std::lock_guard<std::mutex> lockg(lock);
-				socketSet.insert(tlsSock);
+				socketSet.insert({ tlsSock.get(), tlsSock });
 			}
 			catch (...)	{
-
 			}
 		}
 
 		return;
 	}
 
-	std::size_t lvAsyncEngine::unregisterSocket(lvTlsSocketBase * tlsSock)
+	std::size_t lvAsyncEngine::unregisterSocket(lvTlsSocketBase* tlsSock)
 	{
 		std::size_t count = 0;
 		if (tlsSock) {
@@ -137,12 +147,12 @@ namespace lvasynctls {
 		return count;
 	}
 
-	void lvAsyncEngine::registerConnector(lvTlsConnectionCreator * connector)
+	void lvAsyncEngine::registerConnector(std::shared_ptr<lvTlsConnectionCreator> connector)
 	{
-		if (connector) {
+		if (connector && !dead) {
 			try {
 				std::lock_guard<std::mutex> lockg(lock);
-				connectorSet.insert(connector);
+				connectorSet.insert({ connector.get() , connector});
 			}
 			catch (...) {
 
@@ -152,7 +162,7 @@ namespace lvasynctls {
 		return;
 	}
 
-	std::size_t lvAsyncEngine::unregisterConnector(lvTlsConnectionCreator * connector)
+	std::size_t lvAsyncEngine::unregisterConnector(lvTlsConnectionCreator* connector)
 	{
 		std::size_t count = 0;
 		if (connector) {
@@ -179,26 +189,21 @@ namespace lvasynctls {
 	}
 
 	//performs the actual work of running the IO engine
-	void lvAsyncEngine::ioRunThread(boost::shared_ptr<boost::asio::io_service> ioengine)
+	void lvAsyncEngine::ioRunThread(std::shared_ptr<boost::asio::io_service> ioengine)
 	{
 		do {
-			if (ioengine) {
-				try
-				{
-					ioengine->run();
-				}
-				catch (...)
-				{
-					//ignore exceptions
-					if (ioengine && !(ioengine->stopped() || boost::this_thread::interruption_enabled())) {
-						//if we get into an exception loop lets at least not rail the CPU
-						boost::this_thread::sleep(boost::posix_time::milliseconds(50));
-					}
+			try
+			{
+				ioengine->run();
+			}
+			catch (...)
+			{
+				//ignore exceptions
+				if (!(ioengine->stopped() || boost::this_thread::interruption_enabled())) {
+					//if we get into an exception loop lets at least not rail the CPU
+					boost::this_thread::sleep(boost::posix_time::milliseconds(50));
 				}
 			}
-			else {
-				break;
-			}
-		} while (ioengine && !(ioengine->stopped() || boost::this_thread::interruption_enabled()));
+		} while (!(ioengine->stopped() || boost::this_thread::interruption_enabled()));
 	}
 }

@@ -14,6 +14,10 @@
 #define LVSOCKETMAXREADSIZE 5242880 //5 MB
 #endif
 
+#ifndef LVSOCKETMAXOUTPUTCHUNKS
+#define LVSOCKETMAXOUTPUTCHUNKS 5000
+#endif
+
 #define LVTLSSOCKETERRFLAGABORT 1000
 
 
@@ -25,7 +29,8 @@ namespace lvasynctls {
 	class lvTlsSocketBase {
 	public:
 
-		explicit lvTlsSocketBase(lvAsyncEngine* engineContext, boost::asio::ssl::context& sslContext, size_t streamSize = LVSOCKETMAXREADSIZE);
+		explicit lvTlsSocketBase(std::shared_ptr<lvAsyncEngine> engineContext, boost::asio::ssl::context& sslContext, size_t streamSize = LVSOCKETMAXREADSIZE, size_t outputQueueSize = LVSOCKETMAXOUTPUTCHUNKS);
+		void shutdown();
 		~lvTlsSocketBase();
 
 		//writes are always direct to the stream
@@ -58,7 +63,7 @@ namespace lvasynctls {
 		lvTlsSocketBase(const lvTlsSocketBase& that) = delete;
 		const lvTlsSocketBase& operator=(const lvTlsSocketBase&) = delete;
 				
-		lvAsyncEngine* engineOwner;
+		std::shared_ptr<lvAsyncEngine> engineOwner;
 		boost::asio::io_service::strand socketStrand;
 		boost::asio::ssl::stream<boost::asio::ip::tcp::socket> socket;
 		
@@ -100,6 +105,7 @@ namespace lvasynctls {
 			bool outputRunning;
 			std::queue<outputChunk> outQueue;
 		//end--locked by oQLock
+		size_t oQMaxSize;
 	};
 
 }
