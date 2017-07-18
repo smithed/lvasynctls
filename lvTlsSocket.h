@@ -99,6 +99,7 @@ namespace lvasynctls {
 
 		//just a wrapper for internal function on self
 		void writeAction();
+		void writeCB(const boost::system::error_code & error, std::size_t bytes_transferred);
 
 		std::mutex oQLock;
 		//begin--locked by oQLock

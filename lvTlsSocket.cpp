@@ -185,77 +185,98 @@ namespace lvasynctls {
 
 	// WRITE
 
+
+	void lvTlsSocketBase::writeCB(const boost::system::error_code & error, std::size_t bytes_transferred) {
+		std::vector<unsigned char> * lastData = nullptr;
+		lvasynctls::lvTlsCallback * lastCallback = nullptr;
+		outputChunk next{ nullptr, nullptr };
+		size_t sz = 0;
+		int err = socketErr;
+		bool more = false;
+		{
+			//ok, now we've started the write action lets pop
+			std::lock_guard<std::mutex> lg(oQLock);
+			sz = outQueue.size();
+			if (sz > 0) {
+				auto wd = outQueue.front();
+				lastData = wd.chunkdata;
+				lastCallback = wd.optcallback;
+				outQueue.pop();
+			}
+			if ((sz > 1) && !error && !err && engineOwner) {
+				//more data to write
+				next = outQueue.front();
+				more = true;
+			}
+			else {
+				//no more data, set output running back to false
+				outputRunning = false;
+			}
+		}
+
+		delete lastData;
+		if (lastCallback) {
+			errorCheck(error, lastCallback);
+			lastCallback->execute();
+
+			delete lastCallback;
+			lastCallback = nullptr;
+		}
+
+
+
+		if (more) {
+			//socket is still OK, this request succeeded, and there is more work to do
+			try
+			{
+				async_write(socket, buffer(*(next.chunkdata)), socketStrand.wrap(boost::bind(&lvTlsSocketBase::writeCB, this, boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred)));
+			}
+			catch (...)
+			{
+				int noErr = 0;
+				int eVal = 42;
+				socketErr.compare_exchange_strong(noErr, eVal);
+				{	
+					std::lock_guard<std::mutex> lg(oQLock); 
+					outputRunning = false;
+				}				
+			}
+
+		}
+		else {
+			{
+				std::lock_guard<std::mutex> lg(oQLock);
+				outputRunning = false;
+			}
+			if (error) {
+				int noErr = 0;
+				int code = error.value();
+				//set socket error flag, eventually killing all operations on the socket.
+				socketErr.compare_exchange_strong(noErr, code);
+			}
+		}
+	}
+
 	void lvTlsSocketBase::writeAction() {
-		outputChunk wd{ nullptr, nullptr };
-		bool success = false;
+		outputChunk next{ nullptr, nullptr };
+		bool ready = false;
 		{
 			std::lock_guard<std::mutex> lg(oQLock);
 			if ((0 == socketErr) && (outQueue.size() >= 1)) {
 				//preview the queue, this lets any other enqueuers know they don't need to start a write action
-				wd = outQueue.front();
-				success = true;
+				next = outQueue.front();
+				ready = true;
 			}
 		}
 
-		if (success) {
-			async_write(socket, buffer(*(wd.chunkdata)), socketStrand.wrap(
-				[this](const boost::system::error_code & error, std::size_t bytes_transferred) mutable {
-				std::vector<unsigned char> * data = nullptr;
-				lvasynctls::lvTlsCallback * callback = nullptr;
-				size_t sz = 0;
-				{
-					//ok, now we've started the write action lets pop
-					std::lock_guard<std::mutex> lg(oQLock);
-					sz = outQueue.size();
-					if (sz > 0) {
-						auto wd = outQueue.front();
-						data = wd.chunkdata;
-						callback = wd.optcallback;
-						outQueue.pop();
-					}
-
-
-					if (!error && (0 == socketErr) && (sz > 1) && engineOwner) {
-						//socket is still OK, this request succeeded, and there is more work to do
-						try
-						{
-							(engineOwner->getIOService())->post([this]() mutable { writeAction(); });
-						}
-						catch (...)
-						{
-							int noErr = 0;
-							int eVal = 42;
-							socketErr.compare_exchange_strong(noErr, eVal);
-							outputRunning = false;
-						}
-
-					}
-					else {
-						outputRunning = false;
-						if (error) {
-							int noErr = 0;
-							int code = error.value();
-							//set socket error flag, eventually killing all operations on the socket.
-							socketErr.compare_exchange_strong(noErr, code);
-						}
-					}
-				}
-
-				delete data;
-				if (callback) {
-					errorCheck(error, callback);
-					callback->execute();
-
-					delete callback;
-					callback = nullptr;
-				}
-
-			}
-			));
-
+		if (ready) {
+			async_write(socket, buffer(*(next.chunkdata)), socketStrand.wrap(boost::bind(&lvTlsSocketBase::writeCB, this, boost::asio::placeholders::error,boost::asio::placeholders::bytes_transferred)));
 		}
 		else {
-			outputRunning = false;
+			{
+				std::lock_guard<std::mutex> lg(oQLock);
+				outputRunning = false;
+			}
 		}
 		return;
 	}
@@ -267,11 +288,14 @@ namespace lvasynctls {
 		//general gist of problem and solution is here: https://stackoverflow.com/questions/7754695/boost-asio-async-write-how-to-not-interleaving-async-write-calls
 		if (data) {
 			outputChunk wd{ data, callback };
+			bool start = false;
+			int err = 0;
 			{
 				std::lock_guard<std::mutex> lg(oQLock);
-				int err = socketErr;
-				if (outQueue.size() >= oQMaxSize) {
-					//too many elements, dont' enqueue
+				err = socketErr;
+
+				if ((outQueue.size() >= oQMaxSize) && outputRunning) {
+					//too many elements, dont' enqueue; if not running, go ahead and add but start the run process.
 					return 0;
 				}
 				if (err != 0) {
@@ -280,33 +304,38 @@ namespace lvasynctls {
 				}
 				outQueue.push(wd);
 
-
-				if (!outputRunning && (0 == err)) {
+				if (!outputRunning) {
+					start = true;
 					outputRunning = true;
-					//when we got the lock the output wasnt running, so we need to start the write operation
+				}
+			}
 
-					try
+			if (start) {
+				try
+				{
+					(engineOwner->getIOService())->post([this]() mutable { writeAction(); });
+				}
+				catch (const std::exception&)
+				{
+					int noErr = 0;
+					int eVal = 42;
+					socketErr.compare_exchange_strong(noErr, eVal);
 					{
-						(engineOwner->getIOService())->post([this]() mutable { writeAction(); });
-					}
-					catch (const std::exception&)
-					{
-						int noErr = 0;
-						int eVal = 42;
-						socketErr.compare_exchange_strong(noErr, eVal);
+						std::lock_guard<std::mutex> lg(oQLock);
 						outputRunning = false;
-						return -2;
 					}
-
-					return 2;
-				}
-				else if (0 == err) {
-					//someone else is taking care of it
-					return 1;
-				}
-				else {
+					
 					return -2;
 				}
+
+				return 2;
+			}
+			else if (0 == err) {
+				//someone else is taking care of it
+				return 1;
+			}
+			else {
+				return -2;
 			}
 
 		}
