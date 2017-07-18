@@ -9,7 +9,6 @@
 #include <istream>
 #include <ostream>
 #include <condition_variable>
-#include <boost/lockfree/spsc_queue.hpp>
 
 
 using namespace boost::asio;
@@ -45,7 +44,7 @@ namespace lvasynctls {
 		//set socket error flag if it wasn't set already
 		if (socketErr.compare_exchange_strong(noErr, abortSock)) {
 			//true means it was set to noErr before so we need to kill everything
-
+			bool runningCpy = false;
 			boost::system::error_code ec;
 			int32_t iter = 0;
 			//stop all ongoing write operations, retry up to 2 second (see wait at bottom)
@@ -63,33 +62,19 @@ namespace lvasynctls {
 				
 				{
 					std::lock_guard<std::mutex> lg(oQLock);
+					runningCpy = outputRunning;
+				}
 
-					while (!outQueue.empty()) {
-						//properly clean up queue elements
-						auto temp = outQueue.front();
-
-						delete temp.chunkdata;
-
-						if (temp.optcallback) {
-							temp.optcallback->setErrorCondition(1000, "socket shut down");
-							temp.optcallback->execute();
-							delete temp.optcallback;
-						}
-
-						outQueue.pop();
-					}
-
+				if (!runningCpy) {
+					iter = INT32_MAX;
+				}
+				else {
 					std::this_thread::sleep_for(std::chrono::milliseconds(1)); //yield
-
-					//hopefully by now all write functions have exited, if not: loop
-					if (!outputRunning) {
-						iter = INT32_MAX;
-					}
 				}
 			}
 
 			iter = 0;
-
+			
 			//stop all ongoing read operations, retry up to 2 second (see wait at bottom)
 			while (iter < 2000) {
 				iter++;
@@ -103,31 +88,52 @@ namespace lvasynctls {
 					//assumption is that something in socket.lowest_layer is dead, so we should probably stop running.
 					iter = INT32_MAX;
 				}
-
 				{
 					std::lock_guard<std::mutex> lg(iSLock);
-
-					while (!inQueue.empty()) {
-						//properly clean up queue elements
-						auto temp = inQueue.front();
-
-						if (temp.optcallback) {
-							temp.optcallback->setErrorCondition(1000, "socket shut down");
-							temp.optcallback->execute();
-							delete temp.optcallback;
-						}
-
-						inQueue.pop();
-					}
-
+					runningCpy = inputRunning;
+				}
+				if (!inputRunning) {
+					iter = INT32_MAX;
+				}
+				else {
 					std::this_thread::sleep_for(std::chrono::milliseconds(1)); //yield
+				}				
+			}
 
-					//hopefully by now all read functions have exited, if not: loop
-					if (!inputRunning) {
-						iter = INT32_MAX;
+			//clear queues
+			{
+				std::lock_guard<std::mutex> lg(oQLock);
+				while (!outQueue.empty()) {
+					//properly clean up queue elements
+					auto temp = outQueue.front();
+
+					delete temp.chunkdata;
+
+					if (temp.optcallback) {
+						temp.optcallback->setErrorCondition(1000, "socket shut down");
+						temp.optcallback->execute();
+						delete temp.optcallback;
 					}
+
+					outQueue.pop();
 				}
 			}
+			{
+				std::lock_guard<std::mutex> lg(iSLock);
+				while (!inQueue.empty()) {
+					//properly clean up queue elements
+					auto temp = inQueue.front();
+
+					if (temp.optcallback) {
+						temp.optcallback->setErrorCondition(1000, "socket shut down");
+						temp.optcallback->execute();
+						delete temp.optcallback;
+					}
+
+					inQueue.pop();
+				}
+			}
+
 
 
 			try {
